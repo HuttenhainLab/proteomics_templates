@@ -1,0 +1,651 @@
+---
+title: "ArtMS_Template"
+author: "Dain Brademan"
+date: "2024-01-30"
+output: html_document
+---
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document.
+
+# Installing / Loading Required R Libraries
+
+When I'm working on a script from the ground up, the first thing I like to do is install (if not already installed) & load all the libraries that I'm planning on using before I even start thinking about loading and manipulating any data.
+
+### Installing CRAN Packages
+
+Libraries only need to be installed once. After that, they're saved to your computer and you can view them under the **Packages** tab in the bottom right panel on your screen. How do you tell which libraries/packages you need to install? I usually just run the load statements below, and R will tell me if I don't have a package installed
+
+The packages used in this code come from two different repositories, $\underline{C}omprehensive\space\underline{R}\space\underline{A}rchive\space\underline{N}etwork$ (CRAN) and BioConductor. They're installed differently.
+
+CRAN packages can be installed several different ways. The first way is demonstrated in the code chunk below. Alternatively, you can click to the **Packages** tab over on the bottom right of the screen. You'll find an **Install** and **Update** button there that you can use to browse for packages
+
+```{r}
+# Don't need run this every time. 
+# Only if you need to install a package.
+# Just replace the Package in the parentheses with whatever you need installed
+# install.packages(R.utils) # Commented out for convenience
+```
+
+### Installing BioConductR Packages
+
+BioConductor has its own package manager. Before you can install anything from it, you first need to install the BioConductor manager from CRAN.
+
+```{r}
+# install.packages("BiocManager")
+```
+
+Then you can install all the BioConductor packages you want! Note, you may be prompted in the console window (bottom left) if you want to update packages. It's generally a good idea. Sometimes a package refuses to update. If that happens, close out of all your R tabs, clear your workspace, and try again. Sometimes incompatible packages can clash and cause really weird errors that are tough to troubleshoot, so I'd recommend keeping things as updated as possible.
+
+```{r}
+# Install a specific version of BioConductor core packages
+# BiocManager::install(version = "3.18)
+
+# Install latest version of BioConductor core packages
+# BiocManager::install()
+
+```
+
+Some BioConductor packages don't install with the core distribution. Do install these add-ons, you can specifically request these packages be installed
+This project specifically requires ArtMS
+```{r}
+# Install a set of specific non-core package. Format: c("Package1", "Package2", etc....)
+BiocManager::install(c("artMS"))
+```
+
+### Load Packages
+
+Now that in theory everything is installed. Let's load our packages. If you get any errors regarding **Package not found**, just go back and install it! A general rule is the fully lowercase libraries are from CRAN and the CamelCase libraries are from BioConductor
+
+```{r}
+# Load Packages
+library(MSstats)
+library(dplyr)
+library(R.utils) # Actually a cran package
+library(dplyr)
+library(svglite)
+library (data.table)
+# library (ComplexHeatmap) # not needed in this code
+library (circlize)
+library (ggplot2)
+rotate.x.axis.text <- theme(axis.text.x = element_text(angle = 90,vjust = 0.5, hjust=1))
+library (magrittr)
+library (pbapply)
+library(ggrepel)
+
+# Package versions
+# MSstats version 4.10.0
+# MSstatsTMT version 2.10.0
+# MSstatsPTM version 2.4.1
+```
+
+
+# Import Data from Spectronaut Report
+
+### Pull Ben Polacco's code for Spectronaut -> artMS conversion
+```{r}
+source("../../Krogan bp_utils/spectronautFile2ArtMS.R")
+```
+
+### Run artMS Using default settings
+```{r}
+artmsInput <- spectronautFile2ArtMS("../data/Spectronaut/20240202_080916_LargeScale_BeadTest_Report.tsv", outFilePrefix = "artms/exp1")  
+# writing out files is required to get around a problem in artMS using in-memory data.tables
+
+artmsQualityControlEvidenceBasic(artmsInput$config_data$files$evidence, artmsInput$config_data$files$keys, prot_exp = "AB")
+```
+
+
+**Only run this block if you have processed data from Spectronaut** Read in the entire Spectronaut report into memory.
+
+```{r}
+# read in entire spectronaut report
+#spectronautData.raw <- fread ("./path/to/your/spectronaut/output_report.tsv")
+spectronautData.raw <- fread ("../AM Beadtest/20240130_224435_TT000242_Report.tsv")
+```
+
+# Clean data
+
+**Only run this block if you have processed data from Spectronaut**
+
+It's recommended to include commonly observed contaminant proteins when processing your proteomic datasets. However, Spectronaut does not remove these entries for you. Fortunately, all contaminant protein accessions are prepended with the text **Cont\_** so we can go through each row in our dataset and toss that data ourselves.
+
+```{r}
+# remove all contaminant proteins. We don't want that crap
+substring_to_remove <- "Cont_"
+
+# Identify rows containing the contaminant substring
+rows_to_remove <- grep(substring_to_remove, spectronautData.raw$PG.ProteinAccessions)
+
+# Remove rows using the above vector of row indices
+spectronautData.ContaminantsRemoved <- spectronautData.raw[-rows_to_remove, ]
+```
+
+# Make protein metadata linker table
+
+During data processing via msStats most of the metadata we'd like to include for visualization or functional enrichment analysis is discarded. I find it useful to create a linker table early on containing all the metadata I want to crossmap back in based on a unique identifier. The best one I've found is the Uniprot accession ID column AKA **PG.ProteinAccession**.
+
+**Only run this block if you have processed data from Spectronaut**
+
+```{r}
+# scrape a linker table for Uniprot IDs and Protein Names for later visualization
+proteinNameCrossLookup <- subset(spectronautData.ContaminantsRemoved, select = c(PG.ProteinAccessions, PG.ProteinNames))
+
+# rename columns for easy merging later
+colnames(proteinNameCrossLookup) <- c("Protein", "ProteinName")
+
+# filter to distinct protein IDs. %>% is an operator from the package magrittr which can be used to chain multiple functions together.
+proteinNameCrossLookup <- proteinNameCrossLookup %>% distinct(Protein, .keep_all = TRUE)
+```
+
+**Only run this block if you have processed data from MaxQuant**
+
+```{r}
+# scrape a linker table for Uniprot IDs and Protein Names for later visualization
+proteinNameCrossLookup <- subset(maxQuantData.proteinGroups, select = c(`Protein IDs`, `Gene names`))
+
+# rename columns for easy merging later
+colnames(proteinNameCrossLookup) <- c("Protein", "ProteinName")
+
+# filter to distinct protein IDs. %>% is an operator from the package magrittr which can be used to chain multiple functions together.
+proteinNameCrossLookup <- proteinNameCrossLookup %>% distinct(Protein, .keep_all = TRUE)
+```
+
+# Reformat data for msStats Data Processing
+
+Most proteomic pipelines by default do not export data in the format that msStat expects for protein grouping and normalization. Fortunately for us, msStats already has a built-in converter function that we can take advantage of with minimal effort. While it's not the worst thing to reformat this data ourselves, work smarter, not harder.
+
+**Only run this block if you have processed data from Spectronaut**
+
+```{r}
+# the optional arguments are recommended in the msStats user guide. Feel free to change if you know better.
+global.prepared <- SpectronauttoMSstatsFormat(spectronautData.ContaminantsRemoved,
+                                       filter_with_Qvalue = TRUE, ## same as default
+                                       qvalue_cutoff = 0.01, ## same as default
+                                       removeProtein_with1Feature = TRUE,
+                                       use_log_file = FALSE)
+
+```
+
+**Only run this block if you have processed data from MaxQuant**
+
+```{r}
+global.prepared <- MaxQtoMSstatsFormat(maxQuantData.evidence, 
+                                       maxQuantData.annotations, 
+                                       maxQuantData.proteinGroups)
+```
+
+# Quality Control Plots of the Raw Data
+
+Now is a good time to take a look at the raw data.
+
+```{r}
+hist(log2(global.prepared$Intensity), breaks = 100)
+```
+
+```{r}
+unique_counts <- peptidesPerCondition %>%
+  group_by(Condition) %>%
+  summarize(Unique_Peptide_Count = n_distinct(PeptideSequence))
+
+ggplot(unique_counts, aes(x = Condition, y = Unique_Peptide_Count)) +
+  geom_bar(stat = "identity", fill = "skyblue", width = 0.5) +
+  labs(title = "Unique Peptide Sequences per Condition",
+       x = "Condition",
+       y = "Number of Unique Peptide Sequences") +
+  geom_vline(xintercept = 5.5, linetype = "dashed", color = "darkgray") +
+  geom_vline(xintercept = 10.5, linetype = "dashed", color = "darkgray") +
+  rotate.x.axis.text
+
+ggsave("./UniquePeptideSequencesPerCondition.pdf")
+```
+
+Plot the number of quantified measurements per MS analysis. This is generally more interesting when you're not using match between runs in Spectronaut.
+
+```{r, fig.width = 10, fig.height = 4}
+
+
+ggplot(data = test, aes(x = paste0(Condition, "_", BioReplicate), fill = Condition)) +
+  geom_bar(stat = "count") +
+  rotate.x.axis.text # this is defined in the default template of all my Rmd files
+
+ggsave("TransitionsPerSample.svg")
+```
+
+```{r}
+ggplot (data = global.prepared, aes (x = paste0(Condition, "_", BioReplicate),
+                          y = log10(Intensity), 
+                          fill = Condition)) + 
+  geom_boxplot() +
+  rotate.x.axis.text # this is defined in the default template of all my Rmd files
+
+ggsave("TransitionIntensitiesPerSample.svg")
+```
+
+# Use MSstats for protein summarization
+
+This is where we summarize peptides (or peptide transitions depending on your data export format) back into protein groups. Depending on your experiment, you're going to want to turn normalization on or off. For your typical APEX experiment, the control condition doesn't have Biotin Phenol meaning biotin enrichment does not occur. We expect an entirely different population of proteins to be enriched for in the BP samples, so its best to not do any sort of normalization at this point.
+
+```{r}
+global.proteinSummarization = MSstats::dataProcess(global.prepared,
+                               normalization = 'FALSE',				
+                               logTrans = 2,				
+                               featureSubset = 'highQuality',				
+                               summaryMethod="TMP",
+                               censoredInt='NA',				
+                               MBimpute=TRUE,				
+                               maxQuantileforCensored=0.999)
+
+```
+
+# Plot protein intensities pre-normalization
+
+All of our peptide-level data has now been summarized into protein groups. Let's inspect the intensity distributions of this data. Note: the data process function already log2 transformed this data, so we don't have to ourselves.
+
+```{r}
+
+ggplot (global.proteinSummarization$ProteinLevelData, aes (x = interaction ( SUBJECT, GROUP), y = LogIntensities, fill = GROUP)) + geom_boxplot() + rotate.x.axis.text
+ggsave("ProteinIntensities_PostNormalization.svg")
+
+```
+
+```{r}
+unique_counts <- global.proteinSummarization$ProteinLevelData %>%
+  group_by(GROUP) %>%
+  summarize(Unique_Protein_Count = n_distinct(Protein))
+
+ggplot(unique_counts, aes(x = GROUP, y = Unique_Protein_Count)) +
+  geom_bar(stat = "identity", fill = "skyblue", width = 0.5) +
+  labs(title = "Count of Protein Groups per Condition",
+       x = "Condition",
+       y = "Number of Protein Groups") +
+  geom_vline(xintercept = 5.5, linetype = "dashed", color = "darkgray") +
+  geom_vline(xintercept = 10.5, linetype = "dashed", color = "darkgray") +
+  rotate.x.axis.text
+
+ggsave("./UniqueProteinGroupsPerCondition.pdf")
+```
+
+# Plot average protein CVs per condition
+```{r}
+proteomics_data <- global.proteinSummarization$ProteinLevelData %>%
+  group_by(GROUP, Protein) %>%
+  summarize(CV = sd(LogIntensities) / mean(LogIntensities) * 100)
+
+# Plot the distribution of CV for each group
+ggplot(proteomics_data, aes(x = GROUP, y = CV, fill = GROUP)) +
+  geom_boxplot() +
+  labs(title = "Coefficient of Variation Distribution by Group",
+       x = "",
+       y = "Coefficient of Variation (%)") +
+  rotate.x.axis.text
+
+
+```
+# Native Carboxylase Enrichment
+
+This is a quality control plot I borrowed from Ben Polacco.If you've normalized your data, it's useful. Without normalization the results are pretty difficult to interpret.
+
+*APEX works by labeling neighboring/interacting proteins with biotin which is then used to purify labeled proteins. There are also proteins that are endogenously biotinylated which will co-purify with the APEX-labeled proteins. Here we look at a subset of these endogenous biotin proteins, and we inspect their post-normalization background levels, which are inversely related to the labeling-efficiency of APEX. More background after normalization implies there is less APEX-labeled signal.*
+
+If you see your control conditions at higher abundance compared to the rest of your samples, great, APEX worked!
+
+```{r}
+
+biotin.carboxylases.up <- c("O00763","P05165","P11498","Q13085","Q96RQ3")
+
+test <- as.data.table(global.proteinSummarization$ProteinLevelData)
+test <- test[grepl(paste(biotin.carboxylases.up, collapse = "|"), test$Protein), ]
+#test <- test[test$Protein %in% biotin.carboxylases.up, ]
+#ggplot(test[Protein %in% biotin.carboxylases.up], aes (x = interaction ( SUBJECT, GROUP ), y = LogIntensities, color = Protein)) + geom_line(aes(group = Protein)) + geom_point(aes(shape = as.factor(SUBJECT))) +  rotate.x.axis.text
+
+# Plotting code
+ggplot(test, aes(x = Protein, y = LogIntensities, fill = GROUP)) +
+  stat_summary(
+    fun.data = mean_sdl,
+    fun.args = list(mult = 1),
+    geom = "bar",
+    position = position_dodge(width = 0.8),  # Adjust the width as needed
+    width = 0.6  # Adjust the width of bars
+  ) +
+  stat_summary(
+    fun.data = mean_sdl,
+    fun.args = list(mult = 1),
+    geom = "errorbar",
+    position = position_dodge(width = 0.8),
+    width = 0.4  # Adjust the width of error bars
+  ) +
+  labs(title = "Mean Log Intensities with Standard Deviation by GROUP",
+       x = "GROUP", y = "Log Intensities") +
+  theme_bw()
+
+ggsave("NativeCarboxylases_postNormalization.svg")
+
+rm(biotin.carboxylases.up, test)
+```
+
+# Do global pairwise comparisons to check for successful APEX enrichment
+
+Another way you can check for successful APEX enrichment is to make volcano plots comparing protein abundances between non-BP vs BP conditions. What you should see is a mass up-regulation of most proteins. If you don't see that, your enrichment likely didn't work, or you have a ton of background binding. To make these comparisons, we can use the GroupComparison function from msStats. To use this function, you need the output from MSstats::DataProcess, and you also have to build a contrast matrix, essentially a numerical vector indicating what experimental conditions you want to compare.
+
+The first thing I like to do is get the ordered list of experimental conditions from the MsStats output. It makes it easier for me to visualize all the experimental conditions in the study, and I base my contrast matrix around the order of this list. You need to stipulate all the conditions that you DataProcess'd together. You unfortunately can't just subselect a handful.
+
+```{r}
+global.orderedConditions <- levels(global.proteinSummarization$ProteinLevelData$GROUP)
+cat(global.orderedConditions)
+```
+
+Angelina wants a pairwise comparison for all possible conditions
+
+```{r}
+
+# Create the contrast matrix
+contrast.matrix = NULL
+
+# 40 ul control vs time plots
+comparison = matrix(c(1,0,0,0,0,
+                      0,0,0,0,0,
+                      -1,0,0,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+comparison = matrix(c(0,0,0,0,0,
+                      1,0,0,0,0,
+                      -1,0,0,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+
+# 50 ul control vs time plots
+comparison = matrix(c(0,1,0,0,0,
+                      0,0,0,0,0,
+                      0,-1,0,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+comparison = matrix(c(0,0,0,0,0,
+                      0,1,0,0,0,
+                      0,-1,0,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+
+# 60 ul control vs time plots
+comparison = matrix(c(0,0,1,0,0,
+                      0,0,0,0,0,
+                      0,0,-1,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+comparison = matrix(c(0,0,0,0,0,
+                      0,0,1,0,0,
+                      0,0,-1,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+
+# 70 ul control vs time plots
+comparison = matrix(c(0,0,0,1,0,
+                      0,0,0,0,0,
+                      0,0,0,-1,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+comparison = matrix(c(0,0,0,0,0,
+                      0,0,0,1,0,
+                      0,0,0,-1,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+
+# 80 ul control vs time plots
+comparison = matrix(c(0,0,0,0,1,
+                      0,0,0,0,0,
+                      0,0,0,0,-1),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+comparison = matrix(c(0,0,0,0,0,
+                      0,0,0,0,1,
+                      0,0,0,0,-1),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+
+# 40 ul 0min vs 5 min time plots
+comparison = matrix(c(-1,0,0,0,0,
+                      1,0,0,0,0,
+                      0,0,0,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+
+# 50 ul 0min vs 5 min time plots
+comparison = matrix(c(0,-1,0,0,0,
+                      0,1,0,0,0,
+                      0,0,0,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+
+# 60 ul 0min vs 5 min time plots
+comparison = matrix(c(0,0,-1,0,0,
+                      0,0,1,0,0,
+                      0,0,0,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+
+# 70 ul 0min vs 5 min time plots
+comparison = matrix(c(0,0,0,-1,0,
+                      0,0,0,1,0,
+                      0,0,0,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+
+# 80 ul 0min vs 5 min time plots
+comparison = matrix(c(0,0,0,0,-1,
+                      0,0,0,0,1,
+                      0,0,0,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+
+row.names(contrast.matrix) = c("40uL-ctrl-0min", "40uL-ctrl-5min", "50uL-ctrl-0min", "50uL-ctrl-5min", "60uL-ctrl-0min", "60uL-ctrl-5min", "70uL-ctrl-0min", "70uL-ctrl-5min", "80uL-ctrl-0min_80", "80uL-ctrl-5min", "40uL-0min-5min", "50uL-0min-5min", "60uL-0min-5min", "70uL-0min-5min", "80uL-0min-5min")
+
+colnames(contrast.matrix)=c("0min_40", "0min_50", "0min_60", "0min_70", "0min_80", "5min_40", "5min_50", "5min_60", "5min_70", "5min_80", "ctrl_40", "ctrl_50", "ctrl_60", "ctrl_70", "ctrl_80")
+
+# Model-based comparison
+# Do pairwise comparison via MSstats using the provide contrast matrix, then select the comparison results
+global.pairwiseComparison <- MSstats::groupComparison(contrast.matrix, global.proteinSummarization)$ComparisonResult
+global.pairwiseComparison <- merge(global.pairwiseComparison, proteinNameCrossLookup, by = "Protein", all.x = TRUE)
+
+```
+
+# Volcano Plots
+
+Do all the volcano plots for Angelina.
+
+```{r}
+
+myComparisons <- c("ctrl_40 vs 0min_40", "ctrl_40 vs 5min_40", "ctrl_50 vs 0min_50", "ctrl_50 vs 5min_50", "ctrl_60 vs 0min_60", "ctrl_60 vs 5min_60", "ctrl_70 vs 0min_70", "ctrl_70 vs 5min_70", "ctrl_80 vs 0min_80", "ctrl_80 vs 5min_80", "40uL_0min vs 5min", "50uL_0min vs 5min", "60uL_0min vs 5min", "70uL_0min vs 5min", "80uL_0min vs 5min")
+
+# This is essentially a foreach loop. 
+# Takes each of the labels of the above pairwise comparison
+# Subselects that specific data
+# Finally, makes the volcano plot
+lapply(myComparisons, function(comparison) {
+  
+  # define significant proteins
+  thisPairwiseComparison <- as.data.table(global.pairwiseComparison %>% filter(Label == comparison))
+  
+  # Merge human readable protein names in case they're not there.
+  
+  ## This chunks adds a new column to our pairwise comparison data table
+  # For all proteins with |Log2FC| < 1 and pval > 0.05, value is "Not"
+  # For proteins with |Log2FC| >= 1 and pval <= 0.05, value is "Up" or "Down" as appropriate
+  thisPairwiseComparison[, Significance := "Not"]
+  thisPairwiseComparison[pvalue < 0.05 & abs(log2FC) > log2(1.5),
+         Significance := ifelse (log2FC > 0, "Up", "Down")]
+  
+  ## Render volcano plots. Highlight arrestin and adrenoceptor beta 2
+  ggplot(thisPairwiseComparison, aes(x = log2FC, y = -log10(pvalue), color = Significance, label = ProteinName)) +
+    
+    # significance labels and lines
+    # vertical lines
+    geom_vline(xintercept = c(-log2(1.5), log2(1.5)), linetype = "dashed", color = "darkgray") +
+    annotate("text", x = c(-log2(1.5), log2(1.5)), y = 0, label = c("-Log2(1.5)", "Log2(1.5)"), vjust = 1, hjust = 0.5, color = "darkgray") +
+    
+    # horizontal line
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "darkgray") +
+    annotate("text", x = Inf, y = -log10(0.05), label = "p-val=0.05", hjust = 1, color = "darkgray") +
+  
+    # circles representing proteins
+    geom_point() +
+    scale_color_manual(values = c(Not = "gray", Down = "blue", Up = "red")) +
+    ggrepel::geom_text_repel(data = thisPairwiseComparison[Significance != "Not"], size = 2, max.overlaps = 20) +
+    
+    # highlight people's favorite protein
+    geom_point(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ARRB2;DKFZp686L0365", ],
+               aes(x = log2FC, y = -log10(pvalue)), color = "green", size = 3) +
+    geom_text_repel(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ARRB2;DKFZp686L0365", ],
+                    aes(x = log2FC, y = -log10(pvalue)), label = "ARRB2_HUMAN", color = "green", size = 3, box.padding = 0.5) +
+    
+    geom_point(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "EEA1", ],
+               aes(x = log2FC, y = -log10(pvalue)), color = "green", size = 3) +
+    geom_text_repel(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "EEA1", ],
+                    aes(x = log2FC, y = -log10(pvalue)), label = "EEA1_HUMAN", color = "green", size = 3, box.padding = 0.5) +
+    theme_bw()
+  
+  ggsave(paste("./VolcanoPlot_", paste(comparison, ".pdf", sep = ""), sep = "_"))
+})
+
+
+```
+
+Great! From these results, we can definitely see that our APEX labeling worked! If we didn't see a bunch of proteins with large Log2 fold change values, we'd know something went wrong with our labeling.
+
+# Now for the actual experimental comparisons
+
+Okay, so we confirmed the APEX labeling worked using our no-BP controls. Now to make the comparisons we're actually interested in, we need to go back to our original dataset, toss out the no-bp controls, then do the pairwise comparisons all over again.
+
+```{r}
+experiment.Samples <- c("0m_40", "0m_50", "0m_60", "0m_70", "0m_80", "5m_40", "5m_50", "5m_60", "5m_70", "5m_80")
+
+experiment.ConditionSubset <- global.prepared[global.prepared$Condition %in% experiment.Samples, ]
+
+experiment.msstatsResults <- MSstats::dataProcess(experiment.ConditionSubset,
+                                                  normalization = "EQUALIZEMEDIANS",
+                                                  featureSubset = "highQuality",
+                                                  censoredInt="0",
+                                                  MBimpute=TRUE,
+                                                  maxQuantileforCensored=0.999 )
+
+```
+
+# Plot protein intensities pre-normalization
+
+All of our peptide-level data has now been summarized into protein groups. Let's inspect the intensity distributions of this data. Note: the data process function already log2 transformed this data, so we don't have to ourselves.
+
+```{r}
+
+ggplot (experiment.msstatsResults$ProteinLevelData, aes (x = interaction ( SUBJECT, GROUP), y = LogIntensities, fill = GROUP)) + geom_boxplot() + rotate.x.axis.text
+ggsave("ProteinIntensities_ExperimentOnly_PostNormalization.svg")
+
+```
+
+```{r}
+
+# Create the contrast matrix
+contrast.matrix = NULL
+
+comparison = matrix(c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,-1),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+
+row.names(contrast.matrix) = c("Control_80 vs 5min_80")
+
+colnames(contrast.matrix)=c("0m_40", "0m_50", "0m_60", "0m_70", "0m_80", "5m_40", "5m_50", "5m_60", "5m_70", "5m_80", "ctrl_40", "ctrl_50", "ctrl_60", "ctrl_70", "ctrl_80")
+
+# Model-based comparison
+# Do pairwise comparison via MSstats using the provide contrast matrix, then select the comparison results
+global.pairwiseComparison <- MSstats::groupComparison(contrast.matrix, global.proteinSummarization)$ComparisonResult
+global.pairwiseComparison <- merge(global.pairwiseComparison, proteinNameCrossLookup, by = "Protein", all.x = TRUE)
+
+```
+
+```{r}
+
+# Create the contrast matrix
+contrast.matrix = NULL
+
+colnames(contrast.matrix)=c("0m_40", "0m_50", "0m_60", "0m_70", "0m_80", 
+                            "5m_40", "5m_50", "5m_60", "5m_70", "5m_80", 
+                            "ctrl_40", "ctrl_50", "ctrl_60", "ctrl_70", "ctrl_80")
+
+# 40 ul control vs time plots
+comparison = matrix(c(1,0,0,0,0,
+                      0,0,0,0,0,
+                      -1,0,0,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+comparison = matrix(c(0,0,0,0,0,
+                      1,0,0,0,0,
+                      -1,0,0,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+
+# 50 ul control vs time plots
+comparison = matrix(c(0,1,0,0,0,
+                      0,0,0,0,0,
+                      0,-1,0,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+comparison = matrix(c(0,0,0,0,0,
+                      0,1,0,0,0,
+                      0,-1,0,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+
+# 60 ul control vs time plots
+comparison = matrix(c(0,0,1,0,0,
+                      0,0,0,0,0,
+                      0,0,-1,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+comparison = matrix(c(0,0,0,0,0,
+                      0,0,1,0,0,
+                      0,0,-1,0,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+
+# 70 ul control vs time plots
+comparison = matrix(c(0,0,0,1,0,
+                      0,0,0,0,0,
+                      0,0,0,-1,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+comparison = matrix(c(0,0,0,0,0,
+                      0,0,0,1,0,
+                      0,0,0,-1,0),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+
+# 80 ul control vs time plots
+comparison = matrix(c(0,0,0,0,1,
+                      0,0,0,0,0,
+                      0,0,0,0,-1),nrow=1)
+contrast.matrix = rbind(contrast.matrix, comparison)
+comparison = matrix(c(0,0,0,0,0,
+                      0,0,0,0,1,
+                      0,0,0,0,-1),nrow=1)
+
+row.names(contrast.matrix) = c("ctrl_40 vs 0min_40", "ctrl_40 vs 5min_40", "ctrl_50 vs 0min_50", "ctrl_50 vs 5min_50", "ctrl_60 vs 0min_60", "ctrl_60 vs 5min_60", "ctrl_70 vs 0min_70", "ctrl_70 vs 5min_70", "ctrl_80 vs 0min_80", "ctrl_80 vs 5min_80")
+
+colnames(contrast.matrix)=c("0m_40", "0m_50", "0m_60", "0m_70", "0m_80", "5m_40", "5m_50", "5m_60", "5m_70", "5m_80", "ctrl_40", "ctrl_50", "ctrl_60", "ctrl_70", "ctrl_80")
+
+# Model-based comparison
+# Do pairwise comparison via MSstats using the provide contrast matrix, then select the comparison results
+global.pairwiseComparison <- MSstats::groupComparison(contrast.matrix, global.proteinSummarization)$ComparisonResult
+global.pairwiseComparison <- merge(global.pairwiseComparison, proteinNameCrossLookup, by = "Protein", all.x = TRUE)
+
+```
+
+# Volcano Plots
+
+Draw a quick volcano plot showing that APEX worked
+
+```{r}
+
+# define significant proteins
+thisPairwiseComparison <- as.data.table(global.pairwiseComparison)
+
+## This chunks adds a new column to our pairwise comparison data table
+# For all proteins with |Log2FC| < 1 and pval > 0.05, value is "Not"
+# For proteins with |Log2FC| >= 1 and pval <= 0.05, value is "Up" or "Down" as appropriate
+thisPairwiseComparison[, Significance := "Not"]
+thisPairwiseComparison[pvalue < 0.05 & abs(log2FC) > 0.5,
+         Significance := ifelse (log2FC > 0, "Up", "Down")]
+
+## Render volcano plots. Highlight arrestin and adrenoceptor beta 2
+ggplot(thisPairwiseComparison, aes(x = log2FC, y = -log10(pvalue), color = Significance, label = ProteinName)) +
+  geom_point() +
+  scale_color_manual(values = c(Not = "gray", Down = "blue", Up = "red")) +
+  ggrepel::geom_text_repel(data = thisPairwiseComparison[Significance != "Not"], size = 2, max.overlaps = 20) +
+  geom_point(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ARRB2_HUMAN", ],
+             aes(x = log2FC, y = -log10(pvalue)), color = "green", size = 3) +
+  geom_text_repel(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ARRB2_HUMAN", ],
+                  aes(x = log2FC, y = -log10(pvalue)), label = "ARRB2_HUMAN", color = "green", size = 3, box.padding = 0.5) +
+  geom_point(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ADRB2_HUMAN", ],
+             aes(x = log2FC, y = -log10(pvalue)), color = "green", size = 3) +
+  geom_text_repel(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ADRB2_HUMAN", ],
+                  aes(x = log2FC, y = -log10(pvalue)), label = "ADRB2_HUMAN", color = "green", size = 3, box.padding = 0.5) +
+  theme_bw()
+
+ggsave("./VolcanoPlot_control_80ul_vs_5min80ul.svg")
+```
