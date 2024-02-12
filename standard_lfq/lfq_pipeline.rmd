@@ -76,6 +76,12 @@ library (magrittr)
 library (pbapply)
 library(ggrepel)
 
+# Krogan Lab Utility Functions
+utils <- "C:/Users/brademan.WIN/Documents/GitHub/bp_utils/"
+source(paste0(utils,"ManageScriptData.R"))
+WriteSessionInfo()
+WriteInstalledPackages()
+
 # Package versions
 # MSstats version 4.10.0
 # MSstatsTMT version 2.10.0
@@ -83,101 +89,128 @@ library(ggrepel)
 ```
 
 # Pipeline Parameters
+Enter in values specific to your dataset in this block and run all blocks of code sequentially.
 ```{r}
-path.to.data.export <- "../AM Beadtest/20240130_224435_TT000242_Report.tsv"
+# Data Type
+# SP - Spectronaut
+# MQ - MaxQuant
+export.type <- "MQ" 
+
+dataType <- "Abundance"
+dataName <- "AM_Beadtest01"
+
+# File paths to your mass spec data in either MaxQuant or Spectronaut format
+if (export.type == "SP") {
+  # Spectronaut specific parameters
+  spectronaut.lfq.report <- "../example_data/example_data_spectronaut.tsv"
+} else if (export.type == "MQ") {
+  maxquant.evidence <- "../example_data/example_data_MQ_evidence.txt"
+  maxquant.proteingroups <- "../example_data/example_data_MQ_proteinGroups.txt"
+  maxquant.annotations <- "../example_data/example_data_MQ_annotations.csv"
+} else {
+  stop("Non-supported data type. Make sure data type is SP or MQ, otherwise pipeline will break.")
+}
+
+# Names of all possible contrasts will be generated from Condition names (formatted "ConditionName1-ConditionName2")
+  ## Example: regexContrasts <- c("Fsk-DMSO", "H2O2_Fsk-Fsk", "H2O2-DMSO", "H2O2_Fsk-H2O2")
+  ## This list should be strings that match your exact condition names that you entered in Spectronaut. 
+  ## You can also use RegEex terms if you know what you're doing, but I find it more exact to use full condition names to avoid accidental     RegEx matches
+
+regexContrasts <- c("ctrl_40-0min_40", "ctrl_40-5min_40", "0min_40-5min_40",
+                    "ctrl_50-0min_50", "ctrl_50-5min_50", "0min_50-5min_50",
+                    "ctrl_60-0min_60", "ctrl_60-5min_60", "0min_60-5min_60",
+                    "ctrl_70-0min_70", "ctrl_70-5min_70", "0min_70-5min_70",
+                    "ctrl_80-0min_80", "ctrl_80-5min_80", "0min_80-5min_80")
+
 ```
 
-# Import Data from Spectronaut Report
-
-**Only run this block if you have processed data from Spectronaut** Read in the entire Spectronaut report into memory.
+# Import Data
 
 ```{r}
-# read in entire spectronaut report
-#spectronautData.raw <- fread ("./path/to/your/spectronaut/output_report.tsv")
-spectronautData.raw <- fread (path.to.data.export)
+
+# Spectronaut specific data files
+if (export.type == "SP") {
+  spectronaut.lfq.report <- fread(spectronaut.lfq.report)
+  
+# MaxQuant specific data files
+} else if (export.type == "MQ") {
+  maxquant.evidence <- fread(maxquant.evidence)
+  maxquant.proteingroups <- fread(maxquant.proteingroups)
+  maxquant.annotations <- fread(maxquant.annotations)
+}
 ```
 
-# Import Data from MaxQuant Report
-
-**Only use this if you have processed data from MaxQuant**
-
-If your data is coming in from MaxQuant, you need to do a little extra legwork. You import the *Evidence.txt* file from the MaxQuant output. You also need to compile an *Annotations.txt* file that marks what experimental conditions link to what samples
-
-```{r}
-maxQuantData.proteinGroups <- fread("../data/MaxQuant/proteinGroups.txt")
-maxQuantData.evidence <- fread("../data/MaxQuant/evidence.txt")
-maxQuantData.annotations <- fread("../data/MaxQuant/Annotations.csv")
-```
-
-# Clean data
-
-**Only run this block if you have processed data from Spectronaut**
-
+### Clean data
 It's recommended to include commonly observed contaminant proteins when processing your proteomic datasets. However, Spectronaut does not remove these entries for you. Fortunately, all contaminant protein accessions are prepended with the text **Cont\_** so we can go through each row in our dataset and toss that data ourselves.
-
 ```{r}
-# remove all contaminant proteins.
-substring_to_remove <- "Cont_"
-
-# Identify rows containing the contaminant substring
-rows_to_remove <- grep(substring_to_remove, spectronautData.raw$PG.ProteinAccessions)
-
-# Remove rows using the above vector of row indices
-spectronautData.ContaminantsRemoved <- spectronautData.raw[-rows_to_remove, ]
+if (export.type == "SP") {
+  # remove all contaminant proteins.
+  substring_to_remove <- "Cont_"
+  
+  # Identify rows containing the contaminant substring
+  rows_to_remove <- grep(substring_to_remove, spectronaut.lfq.report$PG.ProteinAccessions)
+  
+  # Remove rows using the above vector of row indices
+  spectronaut.lfq.report <- spectronaut.lfq.report[-rows_to_remove, ]
+  
+  rm(rows_to_remove, substring_to_remove)
+}
 ```
 
-# Make protein metadata linker table
+### Make protein metadata linker table
 
 During data processing via msStats most of the metadata we'd like to include for visualization or functional enrichment analysis is discarded. I find it useful to create a linker table early on containing all the metadata I want to crossmap back in based on a unique identifier. The best one I've found is the Uniprot accession ID column AKA **PG.ProteinAccession**.
 
-**Only run this block if you have processed data from Spectronaut**
+``` {r}
 
-```{r}
-# scrape a linker table for Uniprot IDs and Protein Names for later visualization
-proteinNameCrossLookup <- subset(spectronautData.ContaminantsRemoved, select = c(PG.ProteinAccessions, PG.ProteinNames))
-
-# rename columns for easy merging later
-colnames(proteinNameCrossLookup) <- c("Protein", "ProteinName")
-
-# filter to distinct protein IDs. %>% is an operator from the package magrittr which can be used to chain multiple functions together.
-proteinNameCrossLookup <- proteinNameCrossLookup %>% distinct(Protein, .keep_all = TRUE)
-```
-
-**Only run this block if you have processed data from MaxQuant**
-
-```{r}
-# scrape a linker table for Uniprot IDs and Protein Names for later visualization
-proteinNameCrossLookup <- subset(maxQuantData.proteinGroups, select = c(`Protein IDs`, `Gene names`))
+# Spectronaut specific protein linker table
+if (export.type == "SP") {
+  
+  # scrape a linker table for Uniprot IDs and Protein Names for later visualization
+  proteinNameCrossLookup <- subset(spectronaut.lfq.report, select = c(PG.ProteinAccessions, PG.ProteinNames))
+  
+# MaxQuant specific protein linker table
+} else if (export.type == "MQ") {
+  
+  # scrape a linker table for Uniprot IDs and Protein Names for later visualization
+  proteinNameCrossLookup <- subset(maxquant.proteingroups, select = c(`Protein IDs`, `Gene names`))
+}
 
 # rename columns for easy merging later
 colnames(proteinNameCrossLookup) <- c("Protein", "ProteinName")
 
 # filter to distinct protein IDs. %>% is an operator from the package magrittr which can be used to chain multiple functions together.
 proteinNameCrossLookup <- proteinNameCrossLookup %>% distinct(Protein, .keep_all = TRUE)
+
 ```
 
-# Reformat data for msStats Data Processing
 
-Most proteomic pipelines by default do not export data in the format that msStat expects for protein grouping and normalization. Fortunately for us, msStats already has a built-in converter function that we can take advantage of with minimal effort. While it's not the worst thing to reformat this data ourselves, work smarter, not harder.
+### Reformat data for msStats Data Processing
 
-**Only run this block if you have processed data from Spectronaut**
+Most proteomic pipelines by default do not export data in the format that msStat expects for protein grouping and normalization. Fortunately for us, msStats already has a built-in converter function that we can take advantage of with minimal effort. While it's not the worst thing to reformat this data ourselves, work smarter, not harder. 
 
-```{r}
-# the optional arguments are recommended in the msStats user guide. Feel free to change if you know better.
-global.prepared <- SpectronauttoMSstatsFormat(spectronautData.ContaminantsRemoved,
+After this stage, we will no longer need to write special code to handle Spectronaut vs MaxQuant data
+
+``` {r}
+if (export.type == "SP") {
+  
+  # the optional arguments are recommended in the msStats user guide. Feel free to change if you know better.
+  global.prepared <- SpectronauttoMSstatsFormat(spectronaut.lfq.report,
                                        filter_with_Qvalue = TRUE, ## same as default
                                        qvalue_cutoff = 0.01, ## same as default
                                        removeProtein_with1Feature = TRUE,
                                        use_log_file = FALSE)
+  
+  rm(spectronaut.lfq.report)
+} else if (export.type == "MQ") {
+  
+  global.prepared <- MaxQtoMSstatsFormat(maxquant.evidence, 
+                                       maxquant.annotations, 
+                                       maxquant.proteingroups)
+  
+  rm(maxquant.evidence, maxquant.annotations, maxquant.proteingroups)
+}
 
-```
-
-**Only run this block if you have processed data from MaxQuant**
-
-```{r}
-global.prepared <- MaxQtoMSstatsFormat(maxQuantData.evidence, 
-                                       maxQuantData.annotations, 
-                                       maxQuantData.proteinGroups)
 ```
 
 # Quality Control Plots of the Raw Data
@@ -189,32 +222,21 @@ hist(log2(global.prepared$Intensity), breaks = 100)
 ```
 
 ```{r}
-unique_counts <- peptidesPerCondition %>%
+unique_counts <- as.data.table(global.prepared) %>%
+  filter(!is.na(Intensity)) %>%
   group_by(Condition) %>%
   summarize(Unique_Peptide_Count = n_distinct(PeptideSequence))
 
 ggplot(unique_counts, aes(x = Condition, y = Unique_Peptide_Count)) +
   geom_bar(stat = "identity", fill = "skyblue", width = 0.5) +
-  labs(title = "Unique Peptide Sequences per Condition",
+  labs(title = "Unique Transitions / Peptide Sequences per Condition",
        x = "Condition",
-       y = "Number of Unique Peptide Sequences") +
+       y = "Number of Unique Transitions / Peptide Sequences") +
   geom_vline(xintercept = 5.5, linetype = "dashed", color = "darkgray") +
   geom_vline(xintercept = 10.5, linetype = "dashed", color = "darkgray") +
   rotate.x.axis.text
 
-ggsave("./UniquePeptideSequencesPerCondition.pdf")
-```
-
-Plot the number of quantified measurements per MS analysis. This is generally more interesting when you're not using match between runs in Spectronaut.
-
-```{r, fig.width = 10, fig.height = 4}
-
-
-ggplot(data = test, aes(x = paste0(Condition, "_", BioReplicate), fill = Condition)) +
-  geom_bar(stat = "count") +
-  rotate.x.axis.text # this is defined in the default template of all my Rmd files
-
-ggsave("TransitionsPerSample.svg")
+ggsave("./UniqueTransitionOrPeptideSequencesPerCondition.pdf")
 ```
 
 ```{r}
@@ -224,7 +246,7 @@ ggplot (data = global.prepared, aes (x = paste0(Condition, "_", BioReplicate),
   geom_boxplot() +
   rotate.x.axis.text # this is defined in the default template of all my Rmd files
 
-ggsave("TransitionIntensitiesPerSample.svg")
+ggsave("FeatureIntensitiesPerSample.svg")
 ```
 
 # Use MSstats for protein summarization
@@ -240,7 +262,13 @@ global.proteinSummarization = MSstats::dataProcess(global.prepared,
                                censoredInt='NA',				
                                MBimpute=TRUE,				
                                maxQuantileforCensored=0.999)
+```
 
+```{r}
+
+# Save feature and Protein -level data from MsStats output
+fwrite (global.proteinSummarization$FeatureLevelData, ScriptAndDatedFileName(paste(dataName,dataType,"NonNormalized_FeatureLevelData.csv.gz",sep = "_")))
+fwrite (global.proteinSummarization$ProteinLevelData, ScriptAndDatedFileName(paste(dataName,dataType,"NonNormalized_ProteinLevelData.csv.gz", sep = "_")))
 ```
 
 # Plot protein intensities pre-normalization
@@ -251,12 +279,13 @@ All of our peptide-level data has now been summarized into protein groups. Let's
 
 ggplot (global.proteinSummarization$ProteinLevelData, 
         aes (x = interaction ( SUBJECT, GROUP), y = LogIntensities, fill = GROUP)) + geom_boxplot() + rotate.x.axis.text
-ggsave("ProteinIntensities_PostNormalization.svg")
+ggsave("ProteinIntensities_PreNormalization.svg")
 
 ```
 
 ```{r}
 unique_counts <- global.proteinSummarization$ProteinLevelData %>%
+  filter(!is.na(LogIntensities)) %>%
   group_by(GROUP) %>%
   summarize(Unique_Protein_Count = n_distinct(Protein))
 
@@ -347,97 +376,22 @@ Angelina wants a pairwise comparison for all possible conditions
 
 ```{r}
 
-# Create the contrast matrix
-contrast.matrix = NULL
+source (paste0(utils,"MSstats_V4_Functions.R"))
 
-# 40 ul control vs time plots
-comparison = matrix(c(1,0,0,0,0,
-                      0,0,0,0,0,
-                      -1,0,0,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-comparison = matrix(c(0,0,0,0,0,
-                      1,0,0,0,0,
-                      -1,0,0,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
+# makes an MsStats-compatible contrast matrix using the condition comparisons in the parameter block
+contrast.matrix <- makeContrast.regEx ( regEx = regexContrasts,
+                                    mssQ = global.proteinSummarization)
 
-# 50 ul control vs time plots
-comparison = matrix(c(0,1,0,0,0,
-                      0,0,0,0,0,
-                      0,-1,0,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-comparison = matrix(c(0,0,0,0,0,
-                      0,1,0,0,0,
-                      0,-1,0,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-
-# 60 ul control vs time plots
-comparison = matrix(c(0,0,1,0,0,
-                      0,0,0,0,0,
-                      0,0,-1,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-comparison = matrix(c(0,0,0,0,0,
-                      0,0,1,0,0,
-                      0,0,-1,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-
-# 70 ul control vs time plots
-comparison = matrix(c(0,0,0,1,0,
-                      0,0,0,0,0,
-                      0,0,0,-1,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-comparison = matrix(c(0,0,0,0,0,
-                      0,0,0,1,0,
-                      0,0,0,-1,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-
-# 80 ul control vs time plots
-comparison = matrix(c(0,0,0,0,1,
-                      0,0,0,0,0,
-                      0,0,0,0,-1),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-comparison = matrix(c(0,0,0,0,0,
-                      0,0,0,0,1,
-                      0,0,0,0,-1),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-
-# 40 ul 0min vs 5 min time plots
-comparison = matrix(c(-1,0,0,0,0,
-                      1,0,0,0,0,
-                      0,0,0,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-
-# 50 ul 0min vs 5 min time plots
-comparison = matrix(c(0,-1,0,0,0,
-                      0,1,0,0,0,
-                      0,0,0,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-
-# 60 ul 0min vs 5 min time plots
-comparison = matrix(c(0,0,-1,0,0,
-                      0,0,1,0,0,
-                      0,0,0,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-
-# 70 ul 0min vs 5 min time plots
-comparison = matrix(c(0,0,0,-1,0,
-                      0,0,0,1,0,
-                      0,0,0,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-
-# 80 ul 0min vs 5 min time plots
-comparison = matrix(c(0,0,0,0,-1,
-                      0,0,0,0,1,
-                      0,0,0,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-
-row.names(contrast.matrix) = c("40uL-ctrl-0min", "40uL-ctrl-5min", "50uL-ctrl-0min", "50uL-ctrl-5min", "60uL-ctrl-0min", "60uL-ctrl-5min", "70uL-ctrl-0min", "70uL-ctrl-5min", "80uL-ctrl-0min_80", "80uL-ctrl-5min", "40uL-0min-5min", "50uL-0min-5min", "60uL-0min-5min", "70uL-0min-5min", "80uL-0min-5min")
-
-colnames(contrast.matrix)=c("0min_40", "0min_50", "0min_60", "0min_70", "0min_80", "5min_40", "5min_50", "5min_60", "5min_70", "5min_80", "ctrl_40", "ctrl_50", "ctrl_60", "ctrl_70", "ctrl_80")
+# create time stamped file
+resultsFile <- ScriptAndDatedFileName(paste(dataName,dataType,"GroupComparisonResult.csv", sep = "_"))
+#optional if not running as job
+save ( "global.proteinSummarization", "contrast.matrix", "resultsFile", file = ScriptAndDatedFileName(paste(dataName,dataType, "inputGroupComparison.Rdata", sep = "_")))
 
 # Model-based comparison
 # Do pairwise comparison via MSstats using the provide contrast matrix, then select the comparison results
-global.pairwiseComparison <- MSstats::groupComparison(contrast.matrix, global.proteinSummarization)$ComparisonResult
-global.pairwiseComparison <- merge(global.pairwiseComparison, proteinNameCrossLookup, by = "Protein", all.x = TRUE)
+global.pairwiseComparison <- MSstats::groupComparison(contrast.matrix, global.proteinSummarization)
+#global.pairwiseComparisontest <- MSstats::groupComparison(contrast.matrix, global.proteinSummarization)$ComparisonResult
+#global.pairwiseComparison <- merge(global.pairwiseComparison, proteinNameCrossLookup, by = "Protein", all.x = TRUE)
 
 ```
 
@@ -447,13 +401,11 @@ Do all the volcano plots for Angelina.
 
 ```{r}
 
-myComparisons <- c("40uL-ctrl-0min", "40uL-ctrl-5min", "50uL-ctrl-0min", "50uL-ctrl-5min", "60uL-ctrl-0min", "60uL-ctrl-5min", "70uL-ctrl-0min", "70uL-ctrl-5min", "80uL-ctrl-0min_80", "80uL-ctrl-5min", "40uL-0min-5min", "50uL-0min-5min", "60uL-0min-5min", "70uL-0min-5min", "80uL-0min-5min")
-
 # This is essentially a foreach loop. 
 # Takes each of the labels of the above pairwise comparison
 # Subselects that specific data
 # Finally, makes the volcano plot
-lapply(myComparisons, function(comparison) {
+lapply(regexContrasts, function(comparison) {
   
   # define significant proteins
   thisPairwiseComparison <- as.data.table(global.pairwiseComparison %>% filter(Label == comparison))
@@ -496,7 +448,7 @@ lapply(myComparisons, function(comparison) {
                     aes(x = log2FC, y = -log10(pvalue)), label = "EEA1_HUMAN", color = "green", size = 3, box.padding = 0.5) +
     theme_bw()
   
-  ggsave(paste("./VolcanoPlot_", paste(comparison, ".pdf", sep = ""), sep = "_"))
+  ggsave(paste("./VolcanoPlot", paste(comparison, ".pdf", sep = ""), sep = "_"))
 })
 
 
