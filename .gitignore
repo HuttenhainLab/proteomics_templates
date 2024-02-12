@@ -2,8 +2,5 @@
 .DS_store
 
 # Ignore anything in the example data folder for now
-./example_data/*
-example_data/example_data_spectronaut.tsv
-example_data/example_data_MQ_proteinGroups.txt
-example_data/example_data_MQ_evidence.txt
-example_data/example_data_MQ_annotations.csv
+example_data
+

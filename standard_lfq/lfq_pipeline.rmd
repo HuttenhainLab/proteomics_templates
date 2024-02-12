@@ -77,7 +77,7 @@ library (pbapply)
 library(ggrepel)
 
 # Krogan Lab Utility Functions
-utils <- "C:/Users/brademan.WIN/Documents/GitHub/bp_utils/"
+utils <- "../../bp_utils/"
 source(paste0(utils,"ManageScriptData.R"))
 WriteSessionInfo()
 WriteInstalledPackages()
@@ -116,12 +116,18 @@ if (export.type == "SP") {
   ## This list should be strings that match your exact condition names that you entered in Spectronaut. 
   ## You can also use RegEex terms if you know what you're doing, but I find it more exact to use full condition names to avoid accidental     RegEx matches
 
-regexContrasts <- c("ctrl_40-0min_40", "ctrl_40-5min_40", "0min_40-5min_40",
+global.regexContrasts <- c("ctrl_40-0min_40", "ctrl_40-5min_40", "0min_40-5min_40",
                     "ctrl_50-0min_50", "ctrl_50-5min_50", "0min_50-5min_50",
                     "ctrl_60-0min_60", "ctrl_60-5min_60", "0min_60-5min_60",
                     "ctrl_70-0min_70", "ctrl_70-5min_70", "0min_70-5min_70",
                     "ctrl_80-0min_80", "ctrl_80-5min_80", "0min_80-5min_80")
 
+experiment.regexContrasts <- c("0min_40-5min_40", "0min_50-5min_50", "0min_60-5min_60", "0min_70-5min_70", "0min_80-5min_80")
+
+# Sometimes you want to remove certain runs because they're bad, or before data normalization. 
+# You can also do this at the condition level for ease, but you'll need to modify the code in the post-normalization section to do this
+# Specify the runs here. 
+runs.to.remove <- c("TT000243_AM04-01","TT000244_AM04-02","TT000245_AM04-03","TT000246_AM04-04","TT000247_AM04-05","TT000254_AM04-12","TT000255_AM04-13","TT000256_AM04-14","TT000257_AM04-15","TT000258_AM04-16")
 ```
 
 # Import Data
@@ -316,7 +322,7 @@ ggplot(proteomics_data, aes(x = GROUP, y = CV)) +
        y = "Coefficient of Variation (%)") +
   rotate.x.axis.text
 
-ggsave("./ProteinCVs.pdf")
+ggsave("./PreNormalization_ProteinCVs.pdf")
 ```
 
 # Native Carboxylase Enrichment
@@ -356,7 +362,7 @@ ggplot(test, aes(x = Protein, y = LogIntensities, fill = GROUP)) +
        x = "GROUP", y = "Log Intensities") +
   theme_bw()
 
-ggsave("NativeCarboxylases_postNormalization.svg")
+ggsave("NativeCarboxylases_preNormalization.svg")
 
 rm(biotin.carboxylases.up, test)
 ```
@@ -372,14 +378,14 @@ global.orderedConditions <- levels(global.proteinSummarization$ProteinLevelData$
 cat(global.orderedConditions)
 ```
 
-Angelina wants a pairwise comparison for all possible conditions
+Angelina wants a pairwise comparison for all possible conditions. Use Ben Polacco's *makeContrast* function to help build the group comparison matrix without errors. Again, you can do this yourself if you're careful without using this function.
 
 ```{r}
 
 source (paste0(utils,"MSstats_V4_Functions.R"))
 
 # makes an MsStats-compatible contrast matrix using the condition comparisons in the parameter block
-contrast.matrix <- makeContrast.regEx ( regEx = regexContrasts,
+contrast.matrix <- makeContrast.regEx ( regEx = global.regexContrasts,
                                     mssQ = global.proteinSummarization)
 
 # create time stamped file
@@ -389,9 +395,9 @@ save ( "global.proteinSummarization", "contrast.matrix", "resultsFile", file = S
 
 # Model-based comparison
 # Do pairwise comparison via MSstats using the provide contrast matrix, then select the comparison results
-global.pairwiseComparison <- MSstats::groupComparison(contrast.matrix, global.proteinSummarization)
-#global.pairwiseComparisontest <- MSstats::groupComparison(contrast.matrix, global.proteinSummarization)$ComparisonResult
-#global.pairwiseComparison <- merge(global.pairwiseComparison, proteinNameCrossLookup, by = "Protein", all.x = TRUE)
+
+global.pairwiseComparison <- MSstats::groupComparison(contrast.matrix, global.proteinSummarization)$ComparisonResult
+global.pairwiseComparison <- merge(global.pairwiseComparison, proteinNameCrossLookup, by = "Protein", all.x = TRUE)
 
 ```
 
@@ -405,7 +411,7 @@ Do all the volcano plots for Angelina.
 # Takes each of the labels of the above pairwise comparison
 # Subselects that specific data
 # Finally, makes the volcano plot
-lapply(regexContrasts, function(comparison) {
+lapply(global.regexContrasts, function(comparison) {
   
   # define significant proteins
   thisPairwiseComparison <- as.data.table(global.pairwiseComparison %>% filter(Label == comparison))
@@ -458,12 +464,11 @@ Great! From these results, we can definitely see that our APEX labeling worked! 
 
 # Now for the actual experimental comparisons
 
-Okay, so we confirmed the APEX labeling worked using our no-BP controls. Now to make the comparisons we're actually interested in, we need to go back to our original dataset, toss out the no-bp controls, then do the pairwise comparisons all over again.
+Okay, so we confirmed the APEX labeling worked using our no-BP controls. Now to make the comparisons we're actually interested in, we need to go back to our original dataset, toss out the no-bp controls, then do the pairwise comparisons all over again WITH median normalization enabled this time.
 
 ```{r}
-experiment.Samples <- c("0m_40", "0m_50", "0m_60", "0m_70", "0m_80", "5m_40", "5m_50", "5m_60", "5m_70", "5m_80")
 
-experiment.ConditionSubset <- global.prepared[global.prepared$Condition %in% experiment.Samples, ]
+experiment.ConditionSubset <- global.prepared[!(global.prepared$Run %in% runs.to.remove), ]
 
 experiment.msstatsResults <- MSstats::dataProcess(experiment.ConditionSubset,
                                                   normalization = "EQUALIZEMEDIANS",
@@ -474,135 +479,177 @@ experiment.msstatsResults <- MSstats::dataProcess(experiment.ConditionSubset,
 
 ```
 
+```{r}
+
+# Save feature and Protein -level data from MsStats output
+fwrite (experiment.msstatsResults$FeatureLevelData, ScriptAndDatedFileName(paste(dataName,dataType,"Normalized_FeatureLevelData.csv.gz",sep = "_")))
+fwrite (experiment.msstatsResults$ProteinLevelData, ScriptAndDatedFileName(paste(dataName,dataType,"Normalized_ProteinLevelData.csv.gz", sep = "_")))
+```
+
 # Plot protein intensities pre-normalization
 
 All of our peptide-level data has now been summarized into protein groups. Let's inspect the intensity distributions of this data. Note: the data process function already log2 transformed this data, so we don't have to ourselves.
 
 ```{r}
 
-ggplot (experiment.msstatsResults$ProteinLevelData, aes (x = interaction ( SUBJECT, GROUP), y = LogIntensities, fill = GROUP)) + geom_boxplot() + rotate.x.axis.text
-ggsave("ProteinIntensities_ExperimentOnly_PostNormalization.svg")
+ggplot (experiment.msstatsResults$ProteinLevelData, 
+        aes (x = interaction ( SUBJECT, GROUP), y = LogIntensities, fill = GROUP)) + geom_boxplot() + rotate.x.axis.text
+ggsave("ProteinIntensities_PostNormalization.svg")
 
 ```
 
 ```{r}
+unique_counts <- experiment.msstatsResults$ProteinLevelData %>%
+  filter(!is.na(LogIntensities)) %>%
+  group_by(GROUP) %>%
+  summarize(Unique_Protein_Count = n_distinct(Protein))
 
-# Create the contrast matrix
-contrast.matrix = NULL
+ggplot(unique_counts, aes(x = GROUP, y = Unique_Protein_Count)) +
+  geom_bar(stat = "identity", fill = "skyblue", width = 0.5) +
+  labs(title = "Count of Protein Groups per Condition",
+       x = "Condition",
+       y = "Number of Protein Groups") +
+  geom_vline(xintercept = 5.5, linetype = "dashed", color = "darkgray") +
+  geom_vline(xintercept = 10.5, linetype = "dashed", color = "darkgray") +
+  rotate.x.axis.text
 
-comparison = matrix(c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,-1),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-
-row.names(contrast.matrix) = c("Control_80 vs 5min_80")
-
-colnames(contrast.matrix)=c("0m_40", "0m_50", "0m_60", "0m_70", "0m_80", "5m_40", "5m_50", "5m_60", "5m_70", "5m_80", "ctrl_40", "ctrl_50", "ctrl_60", "ctrl_70", "ctrl_80")
-
-# Model-based comparison
-# Do pairwise comparison via MSstats using the provide contrast matrix, then select the comparison results
-global.pairwiseComparison <- MSstats::groupComparison(contrast.matrix, global.proteinSummarization)$ComparisonResult
-global.pairwiseComparison <- merge(global.pairwiseComparison, proteinNameCrossLookup, by = "Protein", all.x = TRUE)
-
+ggsave("./UniqueProteinGroupsPerCondition.pdf")
 ```
+
+# Plot average protein CVs per condition
+
+```{r}
+proteomics_data <- experiment.msstatsResults$ProteinLevelData %>%
+  group_by(GROUP, Protein) %>%
+  summarize(CV = sd(LogIntensities) / mean(LogIntensities) * 100)
+
+# Plot the distribution of CV for each group
+ggplot(proteomics_data, aes(x = GROUP, y = CV)) +
+  geom_boxplot() +
+  labs(title = "Coefficient of Variation Distribution by Group",
+       x = "Please note CV's were calculated in Log2 space, not raw intensities",
+       y = "Coefficient of Variation (%)") +
+  rotate.x.axis.text
+
+ggsave("./PostNormalization_ProteinCVs.pdf")
+```
+
+# Native Carboxylase Enrichment
 
 ```{r}
 
-# Create the contrast matrix
-contrast.matrix = NULL
+biotin.carboxylases.up <- c("O00763","P05165","P11498","Q13085","Q96RQ3")
 
-colnames(contrast.matrix)=c("0m_40", "0m_50", "0m_60", "0m_70", "0m_80", 
-                            "5m_40", "5m_50", "5m_60", "5m_70", "5m_80", 
-                            "ctrl_40", "ctrl_50", "ctrl_60", "ctrl_70", "ctrl_80")
+test <- as.data.table(experiment.msstatsResults$ProteinLevelData)
+test <- test[grepl(paste(biotin.carboxylases.up, collapse = "|"), test$Protein), ]
 
-# 40 ul control vs time plots
-comparison = matrix(c(1,0,0,0,0,
-                      0,0,0,0,0,
-                      -1,0,0,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-comparison = matrix(c(0,0,0,0,0,
-                      1,0,0,0,0,
-                      -1,0,0,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
+# Plotting code
+ggplot(test, aes(x = Protein, y = LogIntensities, fill = GROUP)) +
+  stat_summary(
+    fun.data = mean_sdl,
+    fun.args = list(mult = 1),
+    geom = "bar",
+    position = position_dodge(width = 0.8),  # Adjust the width as needed
+    width = 0.6  # Adjust the width of bars
+  ) +
+  stat_summary(
+    fun.data = mean_sdl,
+    fun.args = list(mult = 1),
+    geom = "errorbar",
+    position = position_dodge(width = 0.8),
+    width = 0.4  # Adjust the width of error bars
+  ) +
+  labs(title = "Mean Log Intensities with Standard Deviation by GROUP",
+       x = "GROUP", y = "Log Intensities") +
+  theme_bw()
 
-# 50 ul control vs time plots
-comparison = matrix(c(0,1,0,0,0,
-                      0,0,0,0,0,
-                      0,-1,0,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-comparison = matrix(c(0,0,0,0,0,
-                      0,1,0,0,0,
-                      0,-1,0,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
+ggsave("NativeCarboxylases_postNormalization.svg")
 
-# 60 ul control vs time plots
-comparison = matrix(c(0,0,1,0,0,
-                      0,0,0,0,0,
-                      0,0,-1,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-comparison = matrix(c(0,0,0,0,0,
-                      0,0,1,0,0,
-                      0,0,-1,0,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
+rm(biotin.carboxylases.up, test)
+```
 
-# 70 ul control vs time plots
-comparison = matrix(c(0,0,0,1,0,
-                      0,0,0,0,0,
-                      0,0,0,-1,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-comparison = matrix(c(0,0,0,0,0,
-                      0,0,0,1,0,
-                      0,0,0,-1,0),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
+# Do global pairwise comparisons to check for successful APEX enrichment
 
-# 80 ul control vs time plots
-comparison = matrix(c(0,0,0,0,1,
-                      0,0,0,0,0,
-                      0,0,0,0,-1),nrow=1)
-contrast.matrix = rbind(contrast.matrix, comparison)
-comparison = matrix(c(0,0,0,0,0,
-                      0,0,0,0,1,
-                      0,0,0,0,-1),nrow=1)
+```{r}
+experiment.orderedConditions <- levels(experiment.msstatsResults$ProteinLevelData$GROUP)
+cat(global.orderedConditions)
 
-row.names(contrast.matrix) = c("ctrl_40 vs 0min_40", "ctrl_40 vs 5min_40", "ctrl_50 vs 0min_50", "ctrl_50 vs 5min_50", "ctrl_60 vs 0min_60", "ctrl_60 vs 5min_60", "ctrl_70 vs 0min_70", "ctrl_70 vs 5min_70", "ctrl_80 vs 0min_80", "ctrl_80 vs 5min_80")
+```
 
-colnames(contrast.matrix)=c("0m_40", "0m_50", "0m_60", "0m_70", "0m_80", "5m_40", "5m_50", "5m_60", "5m_70", "5m_80", "ctrl_40", "ctrl_50", "ctrl_60", "ctrl_70", "ctrl_80")
+We want to do a pairwise comparison for all possible conditions. Use Ben Polacco's *makeContrast* function to help build the group comparison matrix without errors. You can bind your own contrast matrix manually, but the process is very detail oriented and mistakes can be easily made.
+
+```{r}
+
+source (paste0(utils,"MSstats_V4_Functions.R"))
+
+# makes an MsStats-compatible contrast matrix using the condition comparisons in the parameter block
+contrast.matrix <- makeContrast.regEx ( regEx = experiment.regexContrasts,
+                                    mssQ = experiment.msstatsResults)
+
+# create time stamped file
+resultsFile <- ScriptAndDatedFileName(paste(dataName,dataType,"PostNormalization_GroupComparisonResult.csv", sep = "_"))
+#optional if not running as job
+save ( "experiment.msstatsResults", "contrast.matrix", "resultsFile", file = ScriptAndDatedFileName(paste(dataName,dataType, "postNormalization_inputGroupComparison.Rdata", sep = "_")))
 
 # Model-based comparison
 # Do pairwise comparison via MSstats using the provide contrast matrix, then select the comparison results
-global.pairwiseComparison <- MSstats::groupComparison(contrast.matrix, global.proteinSummarization)$ComparisonResult
-global.pairwiseComparison <- merge(global.pairwiseComparison, proteinNameCrossLookup, by = "Protein", all.x = TRUE)
+
+experiment.pairwiseComparison <- MSstats::groupComparison(contrast.matrix, experiment.msstatsResults)$ComparisonResult
+experiment.pairwiseComparison <- merge(experiment.pairwiseComparison, proteinNameCrossLookup, by = "Protein", all.x = TRUE)
 
 ```
 
 # Volcano Plots
 
-Draw a quick volcano plot showing that APEX worked
-
 ```{r}
 
-# define significant proteins
-thisPairwiseComparison <- as.data.table(global.pairwiseComparison)
-
-## This chunks adds a new column to our pairwise comparison data table
-# For all proteins with |Log2FC| < 1 and pval > 0.05, value is "Not"
-# For proteins with |Log2FC| >= 1 and pval <= 0.05, value is "Up" or "Down" as appropriate
-thisPairwiseComparison[, Significance := "Not"]
-thisPairwiseComparison[pvalue < 0.05 & abs(log2FC) > 0.5,
+# This is essentially a foreach loop. 
+# Takes each of the labels of the above pairwise comparison
+# Subselects that specific data
+# Finally, makes the volcano plot
+lapply(experiment.regexContrasts, function(comparison) {
+  
+  # define significant proteins
+  thisPairwiseComparison <- as.data.table(global.pairwiseComparison %>% filter(Label == comparison))
+  
+  # Merge human readable protein names in case they're not there.
+  
+  ## This chunks adds a new column to our pairwise comparison data table
+  # For all proteins with |Log2FC| < 1 and pval > 0.05, value is "Not"
+  # For proteins with |Log2FC| >= 1 and pval <= 0.05, value is "Up" or "Down" as appropriate
+  thisPairwiseComparison[, Significance := "Not"]
+  thisPairwiseComparison[pvalue < 0.05 & abs(log2FC) > log2(1.5),
          Significance := ifelse (log2FC > 0, "Up", "Down")]
-
-## Render volcano plots. Highlight arrestin and adrenoceptor beta 2
-ggplot(thisPairwiseComparison, aes(x = log2FC, y = -log10(pvalue), color = Significance, label = ProteinName)) +
-  geom_point() +
-  scale_color_manual(values = c(Not = "gray", Down = "blue", Up = "red")) +
-  ggrepel::geom_text_repel(data = thisPairwiseComparison[Significance != "Not"], size = 2, max.overlaps = 20) +
-  geom_point(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ARRB2_HUMAN", ],
-             aes(x = log2FC, y = -log10(pvalue)), color = "green", size = 3) +
-  geom_text_repel(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ARRB2_HUMAN", ],
-                  aes(x = log2FC, y = -log10(pvalue)), label = "ARRB2_HUMAN", color = "green", size = 3, box.padding = 0.5) +
-  geom_point(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ADRB2_HUMAN", ],
-             aes(x = log2FC, y = -log10(pvalue)), color = "green", size = 3) +
-  geom_text_repel(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ADRB2_HUMAN", ],
-                  aes(x = log2FC, y = -log10(pvalue)), label = "ADRB2_HUMAN", color = "green", size = 3, box.padding = 0.5) +
-  theme_bw()
-
-ggsave("./VolcanoPlot_control_80ul_vs_5min80ul.svg")
+  
+  ## Render volcano plots. Highlight arrestin and adrenoceptor beta 2
+  ggplot(thisPairwiseComparison, aes(x = log2FC, y = -log10(pvalue), color = Significance, label = ProteinName)) +
+    
+    # significance labels and lines
+    # vertical lines
+    geom_vline(xintercept = c(-log2(1.5), log2(1.5)), linetype = "dashed", color = "darkgray") +
+    annotate("text", x = c(-log2(1.5), log2(1.5)), y = 0, label = c("-Log2(1.5)", "Log2(1.5)"), vjust = 1, hjust = 0.5, color = "darkgray") +
+    
+    # horizontal line
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "darkgray") +
+    annotate("text", x = Inf, y = -log10(0.05), label = "p-val=0.05", hjust = 1, color = "darkgray") +
+  
+    # circles representing proteins
+    geom_point() +
+    scale_color_manual(values = c(Not = "gray", Down = "blue", Up = "red")) +
+    ggrepel::geom_text_repel(data = thisPairwiseComparison[Significance != "Not"], size = 2, max.overlaps = 20) +
+    
+    # highlight people's favorite protein
+    geom_point(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ARRB2;DKFZp686L0365", ],
+               aes(x = log2FC, y = -log10(pvalue)), color = "green", size = 3) +
+    geom_text_repel(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ARRB2;DKFZp686L0365", ],
+                    aes(x = log2FC, y = -log10(pvalue)), label = "ARRB2_HUMAN", color = "green", size = 3, box.padding = 0.5) +
+    
+    geom_point(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "EEA1", ],
+               aes(x = log2FC, y = -log10(pvalue)), color = "green", size = 3) +
+    geom_text_repel(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "EEA1", ],
+                    aes(x = log2FC, y = -log10(pvalue)), label = "EEA1_HUMAN", color = "green", size = 3, box.padding = 0.5) +
+    theme_bw()
+  
+  ggsave(paste("./postNormalization_VolcanoPlot", paste(comparison, ".pdf", sep = ""), sep = "_"))
+})
 ```
