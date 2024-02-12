@@ -1,0 +1,269 @@
+---
+title: "Phospho Kinase Enrichment"
+output: html_document
+date: "2023-06-14"
+---
+
+```{r, Dependencies}
+library (data.table)
+library (ComplexHeatmap)
+library (ggplot2)
+rotate.x.axis.text <- theme(axis.text.x = element_text(angle = 90,vjust = 0.5, hjust=1))
+
+# Change filepath below to location of bp_utils folder
+
+utils <- "../../bp_utils"
+source(paste0(utils,"ManageScriptData.R"))
+WriteSessionInfo()
+WriteInstalledPackages()
+```
+
+
+# Required Parameters
+This dataset assumes that you have already run the Huttenhain phosphoproteomic pipeline to get a set of group comparisons. 
+```{r, Params}
+species <- "HUMAN" # HUMAN MOUSE and RAT are only species with their own kinase substrate data, otherwise, uncomment next line and supply filepath to mapped kinase data
+#kinaseMap <- fread("")
+
+resultsFile <- "./example_phospho_groupComp.csv" # Phospho results Data !!! This Expects the Phospho Site Column to be Labelled 'Protein' or 'Site'
+
+dataName <- "MG05"
+outputDirectory <- "Phospho_kinase_enrichment_data"
+saveKinaseData <- TRUE    # This will write the kinActFull.scores and kinActFull.mapped to zipped csvs
+
+# Threshold Parameters 
+z.apTresh <- 0.2    # z score adjusted pvalue threshold   (feel free to relax this from the usual 0.05 if you're finding few/no sig kinases)
+sea.apThresh <- 0.2 # ksea score adjusted pvalue threshold    (feel free to relax this from the usual 0.05 if you're finding few/no sig kinases)
+nThresh <- 3        # number of substrates required for kinase to be significant
+computeKinase <- TRUE # Set to FALSE if you have already run this rmd and are testing different thresholds to skip kinase data generation
+
+# Plotting Inputs
+labels2plot <- c("*") # Regex for contrasts to include in each bar plot. "-" will plot all contrasts, add strings like "-ctl" to make a plot of only vs control contrasts, or "virus1-" to plot all contrasts that have "virus1-" as the positive group (say you have multiple timepoints, try something like "virus1[.]{1,2}h-",replace "virus1" with your condition and leave "[.]{1,2}h-", it allows any 1 or 2 characters between your condition and the "h-" in a contrast to accomodate single or double digit timepoint labels)
+savePlots <- T
+```
+
+
+```{r, Load Data & Generate Mappings}
+
+if (computeKinase == TRUE){
+
+    source(paste0(utils,"KinaseActivityScores.R"))       
+  
+  # Load kinase Data
+  if (!exists("kinaseMap")){
+    #kinaseMap <-loadKinaseDataOmniPath()           # OmnipathR import_omnipath_enzub() errors in recent versions, just use locally downloaded kinase map instead
+    
+    if (species == "HUMAN"){
+      kinaseMap <- fread("data/HumanKinaseDataOmniPath.csv")
+    }
+    if (species == "MOUSE"){
+      kinaseMap <- fread("data/MouseKinaseDataOmniPath.csv")
+    } 
+    
+    stopifnot( `species argument must be "MOUSE" or "HUMAN". To perform kinase analysis on another species, import your own kinase map and assign it to kinaseMap variable or map your species' gene/site names to human or mouse genes/sites` = species == "HUMAN" | species == "MOUSE" )
+      
+  }
+  
+  # Load and prepare ph results
+  results <- fread(resultsFile)
+  if (!"Site" %in% colnames(results) ){
+    results <- setnames(results, "Protein", "Site")
+    results[, Protein := tstrsplit(Site, "_")[[1]]]
+    # add common gene names as geneSite and gene 
+    source (paste0(utils,"UniprotIDMapping.R"))
+    results[, geneSite := multiUniprotSites2multiGeneSites(results$Site, species = species)] [, gene := multiUniprots2multiGenes(results$Protein, species = species)]
+  }
+  
+  # Convert to single site data
+  siteData <- prepare_AMSS_ResultsFile(results,"geneSite")
+  labels <- unique(siteData$Label)
+  
+  # Compute Kinase activity z scores and sea scores
+  # Ben's code is much nicer
+  kinActList <- lapply (labels, FUN=function(lab){kinaseActivity(siteData[Label == lab & representative==TRUE], plots = FALSE,do.sea = TRUE, kinaseData = kinaseMap)})
+  names(kinActList) <- labels
+  kinActFull.scores <- rbindlist(lapply(kinActList, FUN = function(x)x$scores), idcol="Label")
+  kinActFull.mapped <- rbindlist(lapply(kinActList, FUN = function(x)x$kinaseMapped))
+
+  if (saveKinaseData == TRUE){
+    fwrite(kinActFull.mapped, file.path(outputDirectory, paste(dataName,"kinaseActivityMapped.csv.gz", sep = "_")))
+    fwrite(kinActFull.scores, file.path(outputDirectory, paste(dataName,"kinaseActivityScores.csv.gz", sep = "_")))
+  }
+}
+
+# Check how comparable z scores are across conditions
+kinActFull.scores[,bgMean, by = Label] |> unique() |> print()
+kinActFull.scores$bgMean |> range() |> print()
+                  
+mean(kinActFull.scores$meanLog2FC) |> print()
+
+```
+
+
+```{r, Bar Plot}
+
+sigKinasesZ <-  kinActFull.scores[fdr.BH < z.apTresh & N >= nThresh, unique(CTRL_GENE_NAME)]
+sigKinases.sea <-  kinActFull.scores[padj.sea < sea.apThresh & N > nThresh, unique(CTRL_GENE_NAME)]
+bplotdim <- c(10,8)
+
+
+plotKinases <- function(reg, seaBool = FALSE, dirAnot = "zScore", name = NULL, scores = kinActFull.scores,mapped = kinActFull.mapped, max_fdr = 0.2, sigKinases = NULL, save = F){
+  
+  barPlot <- BarplotKinaseActivities(kinActFull.scores[grepl(reg,kinActFull.scores$Label)], kinActFull.mapped[grepl(reg,kinActFull.mapped$Label)], max_pValue = 0.05, max_fdr = max_fdr, useSEA = seaBool, sigKinases=sigKinases)
+  
+  if (sum(grepl("\\*|\\\\", reg)) > 0){
+    reg <- "__"
+  }
+  pre <- paste(name, reg,"_kinaseActivity_barPlot")
+  dir <- paste(name, dirAnot,"Bar_Plots",sep = "_")
+  title <- paste(name, dirAnot, pre, sep = " ")
+  #barPlot <- barPlot + ggtitle("title")
+  if (save == T & !is.atomic(barPlot)){
+    BackupAsPDF(barPlot,prefix=pre, subDir=dir, dim = bplotdim)
+  }
+  return(barPlot)
+  }
+
+lapply(labels2plot, FUN = plotKinases,
+       sigKinases = sigKinasesZ,
+       max_fdr = z.apTresh, 
+       save = savePlots)
+lapply(labels2plot, FUN = plotKinases, 
+       sigKinases = sigKinases.sea,
+       max_fdr = sea.apThresh, 
+       seaBool = TRUE, 
+       dirAnot = "ksea", 
+       save = savePlots)
+
+
+```
+
+
+```{r, Heatmaps Basic}
+
+sigKinase.mat.z <- as.matrix(dcast (kinActFull.scores[CTRL_GENE_NAME %in% sigKinasesZ], CTRL_GENE_NAME~Label, value.var = "Z"),
+                              rownames = "CTRL_GENE_NAME")
+sigKinase.mat.Nz <- as.matrix(dcast (kinActFull.scores[CTRL_GENE_NAME %in% sigKinasesZ], CTRL_GENE_NAME~Label, value.var = "N"),
+                                  rownames = "CTRL_GENE_NAME")
+kinHM <- Heatmap (sigKinase.mat.z, 
+         cluster_columns=FALSE, 
+         name = "Kinase Z Score",
+         column_split = colnames(sigKinase.mat.z),
+         column_title = paste0( dataName, " Kinase activity Z Score (sig substrate n dependant)"),
+         col = circlize::colorRamp2(breaks = c(-3, -2, 2, 3), colors = c("blue", "gray", "gray", "red")),  # two midpoints in case you want to have a wider gray bar around 0
+         cell_fun = function(j, i, x, y, width, height, fill) {
+                                  if (!is.na(sigKinase.mat.Nz[i,j])){
+                                    grid.text(sprintf("%.0f", sigKinase.mat.Nz[i, j]), x, y, gp = gpar(fontsize=10, col="white"))
+                                  }
+                                })
+
+###
+#### KSEA
+###
+
+sigKinase.mat.Ns <- as.matrix(dcast (kinActFull.scores[CTRL_GENE_NAME %in% sigKinases.sea], CTRL_GENE_NAME~Label, value.var = "N"),
+                                  rownames = "CTRL_GENE_NAME")
+sigKinase.mat.sea <- as.matrix(dcast (kinActFull.scores[CTRL_GENE_NAME %in% sigKinases.sea], CTRL_GENE_NAME~Label, value.var = "sigScore.sea"),
+                              rownames = "CTRL_GENE_NAME")
+sigKinase.mat.l2fc <- as.matrix(dcast (kinActFull.scores[CTRL_GENE_NAME %in% sigKinasesZ], CTRL_GENE_NAME~Label, value.var = "meanLog2FC"),
+                              rownames = "CTRL_GENE_NAME")
+seakinHM <- Heatmap (sigKinase.mat.sea, 
+                  column_title = paste0( dataName, " Kinase activity SEA Score (sig substrate L2FC dependant)"),
+         cluster_columns=FALSE, 
+         name = "Kinase sea Score",
+         column_split = colnames(sigKinase.mat.sea),
+         col = circlize::colorRamp2(breaks = c(-3, -2, 2, 3), colors = c("blue", "gray", "gray", "red")),  # two midpoints in case you want to have a wider gray bar around 0
+         cell_fun = function(j, i, x, y, width, height, fill) {
+                                  if (!is.na(sigKinase.mat.Ns[i,j])){
+                                    grid.text(sprintf("%.0f", sigKinase.mat.Ns[i, j]), x, y, gp = gpar(fontsize=10, col="white"))
+                                  }
+                                })
+seakinHM
+
+
+# Heatmap Colored by Log2fc
+subkinHM <- Heatmap (sigKinase.mat.l2fc, 
+                  column_title = "Kinase activity L2FC",
+         cluster_columns=FALSE, 
+         name = "Mean Log2FC",
+         column_split = colnames(sigKinase.mat.z),
+         col = circlize::colorRamp2(breaks = c(-2, -1, 1, 2), colors = c("blue", "gray", "gray", "red")),  # two midpoints in case you want to have a wider gray bar around 0
+         cell_fun = function(j, i, x, y, width, height, fill) {
+                                  if (!is.na(sigKinase.mat.Nz[i,j])){
+                                    grid.text(sprintf("%.0f", sigKinase.mat.Nz[i, j]), x, y, gp = gpar(fontsize=10, col="white"))
+                                  }
+                                })
+subkinHM
+
+
+if (savePlots == T){
+  BackupAsPDF(kinHM, prefix = paste0(dataName , "Z_kinaseHeatmap_N_"), subDir = "Heatmaps", dim = c(10,8))
+  BackupAsPDF(seakinHM, prefix = paste0( dataName, "ksea_kinaseHeatmap_"), subDir = "Heatmaps", dim = c(10,6))
+  BackupAsPDF(subkinHM, prefix = paste0( dataName,"substrateL2FC_Kinase_heatmap_byCondition_"), subDir = "Heatmaps", dim = c(10,8))
+}
+
+```
+
+
+```{r, Heatmaps with adjusted pvalue shown /cell}
+
+sigKinase.mat.seaAdj <- as.matrix(dcast (kinActFull.scores[CTRL_GENE_NAME %in% sigKinases.sea], CTRL_GENE_NAME~Label, value.var = "padj.sea"),
+                              rownames = "CTRL_GENE_NAME")
+sigKinase.mat.zadj <- as.matrix(dcast (kinActFull.scores[CTRL_GENE_NAME %in% sigKinasesZ], CTRL_GENE_NAME~Label, value.var = "fdr.BH"),
+                              rownames = "CTRL_GENE_NAME")
+
+
+# z score
+kinHM <- Heatmap (sigKinase.mat.z, 
+         cluster_columns=FALSE, 
+         name = "Kinase Z Score",
+         column_split = colnames(sigKinase.mat.z),
+         column_title = "Kinase activity Z Score (sig substrate n dependant; p.adj shown /cell) ",
+         col = circlize::colorRamp2(breaks = c(-3, -2, 2, 3), colors = c("blue", "gray", "gray", "red")),  # two midpoints in case you want to have a wider gray bar around 0
+         cell_fun = function(j, i, x, y, width, height, fill) {
+                                  if (!is.na(sigKinase.mat.zadj[i,j])){
+                                    grid.text(as.character(round(sigKinase.mat.zadj[i,j],4)), x, y, gp = gpar(fontsize=10, col="white"))
+                                  }
+                                })
+
+
+# sea score
+seakinHM <- Heatmap (sigKinase.mat.sea, 
+                  column_title = "Kinase activity SEA Score (sig substrate L2FC dependant; p.adj shown /cell)",
+         cluster_columns=FALSE, 
+         name = "Kinase sea Score",
+         column_split = colnames(sigKinase.mat.sea),
+         col = circlize::colorRamp2(breaks = c(-3, -2, 2, 3), colors = c("blue", "gray", "gray", "red")),  # two midpoints in case you want to have a wider gray bar around 0
+         cell_fun = function(j, i, x, y, width, height, fill) {
+                                  if (!is.na(sigKinase.mat.seaAdj[i,j])){
+                                    grid.text(as.character(round(sigKinase.mat.seaAdj[i,j],4)), x, y, gp = gpar(fontsize=10, col="white"))
+                                  }
+                                })
+seakinHM
+
+# l2fc
+
+subkinHM <- Heatmap (sigKinase.mat.l2fc, 
+                  column_title = "Kinase activity L2FC (Z Score-p.adj shown /cell)",
+         cluster_columns=FALSE, 
+         name = "Mean Log2FC",
+         column_split = colnames(sigKinase.mat.z),
+         col = circlize::colorRamp2(breaks = c(-3, -1, 1, 3), colors = c("blue", "gray", "gray", "red")),  # two midpoints in case you want to have a wider gray bar around 0
+         cell_fun = function(j, i, x, y, width, height, fill) {
+                                  if (!is.na(sigKinase.mat.zadj[i,j])){
+                                    grid.text(as.character(round(sigKinase.mat.zadj[i,j],4)), x, y, gp = gpar(fontsize=10, col="white"))
+                                  }
+                                })
+subkinHM
+
+
+
+if (savePlots == T){
+  BackupAsPDF(subkinHM, prefix = paste0( dataName,"substrateL2FC_Kinase_heatmap_"), subDir = "padj_Heatmaps", dim = c(14,6))
+  BackupAsPDF(kinHM, prefix = paste0( dataName,"Z_Kinase_heatmap_byCondition"), subDir = "padj_Heatmaps", dim = c(14,6))
+  BackupAsPDF(seakinHM, prefix = paste0( dataName,"ksea_Kinase_heatmap_"), subDir = "padj_Heatmaps", dim = c(14,6))
+}
+
+```
+
+
