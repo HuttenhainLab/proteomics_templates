@@ -5,30 +5,33 @@ date: "2023-06-14"
 ---
 
 ```{r, Dependencies}
+
+# Change filepath below to location of bp_utils folder
+utils <- "../../bp_utils/"
+source(paste0(utils,"ManageScriptData.R"))
+
+
 library (data.table)
 library (ComplexHeatmap)
 library (ggplot2)
 rotate.x.axis.text <- theme(axis.text.x = element_text(angle = 90,vjust = 0.5, hjust=1))
-
-# Change filepath below to location of bp_utils folder
-
-utils <- "../../bp_utils"
-source(paste0(utils,"ManageScriptData.R"))
 WriteSessionInfo()
 WriteInstalledPackages()
 ```
 
 
 # Required Parameters
-This dataset assumes that you have already run the Huttenhain phosphoproteomic pipeline to get a set of group comparisons. 
+This script assumes that you have already run the Huttenhain phosphoproteomic pipeline to get a set of group comparisons.
 ```{r, Params}
-species <- "HUMAN" # HUMAN MOUSE and RAT are only species with their own kinase substrate data, otherwise, uncomment next line and supply filepath to mapped kinase data
-#kinaseMap <- fread("")
+# Set species to HUMAN or MOUSE to use preconfigured kinase maps. 
+# Otherwise set to NULL and set `kinaseMap` path to a custom KinaseMap file
+species <- "HUMAN"
+kinaseMap <- NULL #otherwise, /Path/To/Kinase/Map/
 
 resultsFile <- "./example_phospho_groupComp.csv" # Phospho results Data !!! This Expects the Phospho Site Column to be Labelled 'Protein' or 'Site'
 
-dataName <- "MG05"
-outputDirectory <- "Phospho_kinase_enrichment_data"
+dataName <- "Exp01"
+outputDirectory <- "phosphokinase_enrichment_data"
 saveKinaseData <- TRUE    # This will write the kinActFull.scores and kinActFull.mapped to zipped csvs
 
 # Threshold Parameters 
@@ -39,29 +42,39 @@ computeKinase <- TRUE # Set to FALSE if you have already run this rmd and are te
 
 # Plotting Inputs
 labels2plot <- c("*") # Regex for contrasts to include in each bar plot. "-" will plot all contrasts, add strings like "-ctl" to make a plot of only vs control contrasts, or "virus1-" to plot all contrasts that have "virus1-" as the positive group (say you have multiple timepoints, try something like "virus1[.]{1,2}h-",replace "virus1" with your condition and leave "[.]{1,2}h-", it allows any 1 or 2 characters between your condition and the "h-" in a contrast to accomodate single or double digit timepoint labels)
-savePlots <- T
+savePlots <- TRUE
 ```
 
 
 ```{r, Load Data & Generate Mappings}
 
 if (computeKinase == TRUE){
-
-    source(paste0(utils,"KinaseActivityScores.R"))       
   
-  # Load kinase Data
-  if (!exists("kinaseMap")){
-    #kinaseMap <-loadKinaseDataOmniPath()           # OmnipathR import_omnipath_enzub() errors in recent versions, just use locally downloaded kinase map instead
+  if (!dir.exists(outputDirectory)) {
+    dir.create(outputDirectory)
+  }
+  
+  source(paste0(utils,"KinaseActivityScores.R"))       
+  
+  # Load kinase data from preconfigured human or mouse data
+  if (!is.null(species)) {
     
-    if (species == "HUMAN"){
-      kinaseMap <- fread("data/HumanKinaseDataOmniPath.csv")
+    if (species == "HUMAN") {
+      kinaseMap <- fread("./HumanKinaseDataOmniPath.csv")
+    } else if (species == "MOUSE") {
+      kinaseMap <- fread("./MouseKinaseDataOmniPath.csv")
+    } else {
+      stop("The `species` parameter in the parameters block (line 28) must be \"HUMAN\", \"MOUSE\", or \"NULL\"")
     }
-    if (species == "MOUSE"){
-      kinaseMap <- fread("data/MouseKinaseDataOmniPath.csv")
-    } 
     
-    stopifnot( `species argument must be "MOUSE" or "HUMAN". To perform kinase analysis on another species, import your own kinase map and assign it to kinaseMap variable or map your species' gene/site names to human or mouse genes/sites` = species == "HUMAN" | species == "MOUSE" )
-      
+  } else {
+    
+    # Load custom kinase map
+    if (file.exists(kinaseMap)) {
+      kinaseMap <- fread(kinaseMap)
+    } else {
+      stop(paste("Warning: cannot open file \'", kinaseMap, "\': No such file or directoryError in file(filename, \"r\", encoding = encoding) : cannot open the connection"))
+    }
   }
   
   # Load and prepare ph results
@@ -107,9 +120,22 @@ sigKinases.sea <-  kinActFull.scores[padj.sea < sea.apThresh & N > nThresh, uniq
 bplotdim <- c(10,8)
 
 
-plotKinases <- function(reg, seaBool = FALSE, dirAnot = "zScore", name = NULL, scores = kinActFull.scores,mapped = kinActFull.mapped, max_fdr = 0.2, sigKinases = NULL, save = F){
+plotKinases <- function(reg, 
+                        seaBool = FALSE, 
+                        dirAnot = "zScore", 
+                        name = NULL, 
+                        scores = kinActFull.scores, 
+                        mapped = kinActFull.mapped, 
+                        max_fdr = 0.2, 
+                        sigKinases = NULL, 
+                        save = F) {
   
-  barPlot <- BarplotKinaseActivities(kinActFull.scores[grepl(reg,kinActFull.scores$Label)], kinActFull.mapped[grepl(reg,kinActFull.mapped$Label)], max_pValue = 0.05, max_fdr = max_fdr, useSEA = seaBool, sigKinases=sigKinases)
+  barPlot <- BarplotKinaseActivities(kinActFull.scores[grepl(reg,kinActFull.scores$Label)], 
+                                     kinActFull.mapped[grepl(reg,kinActFull.mapped$Label)], 
+                                     max_pValue = 0.05, 
+                                     max_fdr = max_fdr, 
+                                     useSEA = seaBool, 
+                                     sigKinases=sigKinases)
   
   if (sum(grepl("\\*|\\\\", reg)) > 0){
     reg <- "__"
