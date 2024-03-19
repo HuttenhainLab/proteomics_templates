@@ -1,0 +1,91 @@
+This code assumes the input data comes from the *MsStats::dataProcess* function, specifically the *\$ProteinLevelData*.
+
+# Data Import
+
+```{r}
+# Normally this data will already be saved in memory
+# Need to load it in here
+proteinData <- fread("../example_data/example_data_dataProcess_output_protein.csv")
+
+# if you're using the direct dataProcess output e.g. `dp_output$ProteinLevelData`
+  ## make sure to cast it to a data table before going further
+  ## otherwise your intensity values will be cast to character and things will break
+
+# e.g. proteinData <- as.data.table(dp_output$ProteinLevelData)
+```
+
+# Create a matrix of complete protein cases
+
+We need to do some data manipulation to get our dataset into the right shape for PCA.
+
+-   Transform our data from long to wide format at the sample level, *i.e.* by *GROUP* and *SUBJECT*.
+-   Subset our data to a set of completely profiled proteins
+
+PCA does not work with missing values, so either you need to impute beforehand or filter as we do below
+
+```{r}
+# Go from long to wide format
+# Row names are protein groups
+# Columns are each sample's LogIntensity values for each protein
+intensity.matrix <- as.matrix(dcast(as.data.table(global.proteinSummarization$ProteinLevelData), Protein ~GROUP+SUBJECT, value.var = "LogIntensities"),
+                           rownames = "Protein")
+
+
+complete.data.matrix <- intensity.matrix[complete.cases(intensity.matrix),]
+```
+
+# Do PCA
+```{r}
+# Do PCA
+pcaOut <- prcomp(t(complete.data.matrix))
+
+# Reshape from matrix to data table
+pcaDT <- as.data.table(pcaOut$x, keep.rownames=TRUE)
+
+# Add column named `mainGroup`. 
+# This value is derived from the rowname by splitting on '_' and grabbing the first element
+pcaDT[, mainGroup := tstrsplit(rn, "_")[[1]]] #transpose & split
+
+# Add column named `batch`. 
+# This value is derived from the rowname by splitting on '_' and grabbing the first element
+pcaDT[, batch := sapply(strsplit(rn, "_"), function(x) tail(x, 1))] #transpose & split
+
+###
+# You can add other metadata columns here too. This is just for my particular use case
+###
+
+pcaPercentVar <- round(100 * (pcaOut$sdev^2)/sum(pcaOut$sdev^2), 1)
+```
+
+# Visualize PCA Plots
+A standard 2D representation of variance captured by PC1 and PC2
+```{r}
+# Visualize PC1 and PC2, color data points by batch value.
+# You can also color data points by mainGroup or other factors that you scrape out above.
+p <- ggplot (pcaDT, aes(x=PC1, y=PC2, color = batch )) + 
+  geom_point(alpha=1.0, size=4) + 
+  ggrepel::geom_text_repel(aes(label=rn), show.legend = FALSE, size = 3) +
+  theme_bw() + 
+  xlab (sprintf ("PC1, %.1f%%", pcaPercentVar[1])) + 
+  ylab (sprintf ("PC2, %.1f%%", pcaPercentVar[2])) + 
+  ggtitle (sprintf ("PCA using %d proteins (log intensity)", nrow(complete.data.matrix))) 
+p
+
+# Optionally save the figure
+#ggsave(paste0(output.figure.folder, "non-normalizedPCA.pdf"))
+```
+
+A 3D visualization done via Plotly. This allows you to also view PC3 at the same time.
+```{r}
+fig <- plot_ly(pcaDT, x = ~PC1, y = ~PC2, z = ~PC3, color = ~batch, colors = c('#636EFA','#EF553B','#00CC96') ) %>%
+  add_markers(size = 12)
+
+
+fig <- fig %>%
+  layout(
+    title = "3D PCA",
+    scene = list(bgcolor = "#e5ecf6")
+)
+
+fig
+```

@@ -610,7 +610,7 @@ experiment.pairwiseComparison <- merge(experiment.pairwiseComparison, proteinNam
 lapply(experiment.regexContrasts, function(comparison) {
   
   # define significant proteins
-  thisPairwiseComparison <- as.data.table(global.pairwiseComparison %>% filter(Label == comparison))
+  thisPairwiseComparison <- as.data.table(experiment.pairwiseComparison %>% filter(Label == comparison))
   
   # Merge human readable protein names in case they're not there.
   

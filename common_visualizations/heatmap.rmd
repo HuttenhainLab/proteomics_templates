@@ -1,0 +1,85 @@
+# Draw Heatmap
+
+This code assumes you have the output from MsStats::GroupComparison$ComparisonResults stored to the variable `global.pairwiseComparison`. For this example code, I have 3 distinct heat maps that I want to make of group comparisons
+
+```{r}
+# filter all proteins in group comparisons to having at least 1 significant changer in for each of our groups
+# for each major comparison group, grab all relevant pairwise comparisons
+# filter for significant changers
+# make heat map
+# Go enrichment on clusters
+pval.cutoff <- 0.05
+FC.cutoff <- log2(1.5)
+
+con1.con3 <- as.data.table(global.pairwiseComparison %>% filter(Label %in% global.regexContrasts[1:5]))
+con1.con2 <- as.data.table(global.pairwiseComparison %>% filter(Label %in% global.regexContrasts[6:10]))
+con2.con3 <- as.data.table(global.pairwiseComparison %>% filter(Label %in% global.regexContrasts[11:15]))
+
+
+```
+
+
+```{r}
+
+con1.con3 <- as.data.table(
+  con1.con3 %>% 
+    group_by(Protein) %>% 
+    filter(any(pvalue <= pval.cutoff & abs(log2FC) >= FC.cutoff))
+)
+
+con1.con2 <- as.data.table(
+  con1.con2 %>% 
+    group_by(Protein) %>% 
+    filter(any(pvalue <= pval.cutoff & abs(log2FC) >= FC.cutoff))
+)
+
+con2.con3 <- as.data.table(
+  con2.con3 %>% 
+    group_by(Protein) %>% 
+    filter(any(pvalue <= pval.cutoff & abs(log2FC) >= FC.cutoff))
+)
+
+
+```
+
+```{r}
+con1.con3 <- as.matrix(dcast(con1.con3, Protein ~ Label, value.var = "log2FC"),
+                           rownames = "Protein")
+
+con1.con2 <- as.matrix(dcast(con1.con2, Protein ~ Label, value.var = "log2FC"),
+                           rownames = "Protein")
+
+con2.con3 <- as.matrix(dcast(con2.con3, Protein ~ Label, value.var = "log2FC"),
+                           rownames = "Protein")
+```
+
+```{r}
+con1.con3[is.infinite(con1.con3)] <- 0
+con1.con2[is.infinite(con1.con2)] <- 0
+con2.con3[is.infinite(con2.con3)] <- 0
+
+con1.con3[is.na(con1.con3)] <- 0
+con1.con2[is.na(con1.con2)] <- 0
+con2.con3[is.na(con2.con3)] <- 0
+```
+
+```{r}
+pdf("SigProteins_C1-C2.pdf")
+
+thisData <- con1.con2
+# Now create the heatmap
+
+heatmap <- Heatmap(
+  thisData,
+  row_title = sprintf("%d proteins with\npval < 0.05 & |Log2FC| > log2(1.5)", nrow(thisData)),
+  name = "Log2FC of Labeled Timepoints\n",
+  show_row_names = TRUE,
+  cluster_columns = FALSE,
+  heatmap_height = unit(0.4, "cm")*nrow(thisData)
+  #row_names_gp = grid::gpar(fontsize = 2)
+)
+
+drawnHeatmap <- draw(heatmap)
+
+dev.off()
+```

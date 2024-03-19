@@ -1,0 +1,53 @@
+Assumes input from MsStats::groupComparison$ComparisonResults and regexContrasts defined from bp_utils
+
+```{r}
+lapply(global.regexContrasts, function(comparison) {
+  
+  # define significant proteins
+  thisPairwiseComparison <- as.data.table(global.pairwiseComparison %>% filter(Label == comparison))
+  
+  # Merge human readable protein names in case they're not there.
+  
+  ## This chunks adds a new column to our pairwise comparison data table
+  # For all proteins with |Log2FC| < 1 and pval > 0.05, value is "Not"
+  # For proteins with |Log2FC| >= 1 and pval <= 0.05, value is "Up" or "Down" as appropriate
+  thisPairwiseComparison[, Significance := "Not"]
+  thisPairwiseComparison[pvalue < 0.05 & abs(log2FC) > log2(1.5),
+         Significance := ifelse (log2FC > 0, "Up", "Down")]
+  
+  thisCondition1 <- strsplit(comparison, '-')[[1]][1]
+  thisCondition2 <- strsplit(comparison, '-')[[1]][2]
+  
+  ## Render volcano plots. Highlight arrestin and adrenoceptor beta 2
+  ggplot(thisPairwiseComparison, aes(x = log2FC, y = -log10(pvalue), color = Significance, label = ProteinName)) +
+  
+    # circles representing proteins
+    geom_point() +
+    scale_color_manual(values = c(Not = "gray", Down = "blue", Up = "red")) +
+    ggrepel::geom_text_repel(data = thisPairwiseComparison[Significance != "Not"], size = 2, max.overlaps = 20) +
+    labs(x = paste("Protein Abundance - log2FC", thisCondition1, "-", thisCondition2)) +
+  
+    # highlight people's favorite protein
+    # geom_point(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ARRB2;DKFZp686L0365", ],
+    #            aes(x = log2FC, y = -log10(pvalue)), color = "green", size = 3) +
+    # geom_text_repel(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ARRB2;DKFZp686L0365", ],
+    #                 aes(x = log2FC, y = -log10(pvalue)), label = "ARRB2_HUMAN", color = "green", size = 3, box.padding = 0.5) +
+    # 
+    # geom_point(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "EEA1", ],
+    #            aes(x = log2FC, y = -log10(pvalue)), color = "green", size = 3) +
+    # geom_text_repel(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "EEA1", ],
+    #                 aes(x = log2FC, y = -log10(pvalue)), label = "EEA1_HUMAN", color = "green", size = 3, box.padding = 0.5) +
+  
+   # significance labels and lines
+    # vertical lines
+    geom_vline(xintercept = c(-log2(1.5), log2(1.5)), linetype = "dashed", color = "darkgray") +
+    annotate("text", x = c(-log2(1.55), log2(1.55)), y = 0, label = c("-Log2(1.5)", "Log2(1.5)"), vjust = 0, hjust = c(1, 0), color = "black") +
+    
+    # horizontal line
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "darkgray") +
+    annotate("text", x = Inf, y = -log10(0.07), label = "p-val=0.05", vjust = 1, hjust = 1, color = "black") +
+    theme_bw()
+  
+  ggsave(paste("./VolcanoPlot", paste(comparison, ".pdf", sep = ""), sep = "_"))
+})
+```
