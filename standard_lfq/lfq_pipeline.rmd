@@ -62,42 +62,65 @@ Now that in theory everything is installed. Let's load our packages. If you get 
 
 ```{r}
 # Load Packages
-library(MSstats)
+library(devtools)
 library(dplyr)
-library(R.utils) # Actually a cran package
-library(dplyr)
-library(svglite)
 library (data.table)
-# library (ComplexHeatmap) # not needed in this code
-library (circlize)
-library (ggplot2)
-rotate.x.axis.text <- theme(axis.text.x = element_text(angle = 90,vjust = 0.5, hjust=1))
 library (magrittr)
 library (pbapply)
+library(R.utils) # Actually a cran package
+
+# Plotting packages
+library(plotly)
+library (ggplot2)
+library (circlize)
 library(ggrepel)
+library(svglite)
+rotate.x.axis.text <- theme(axis.text.x = element_text(angle = 90,vjust = 0.5, hjust=1))
 
-# Krogan Lab Utility Functions
-utils <- "../../bp_utils/"
-source(paste0(utils,"ManageScriptData.R"))
-WriteSessionInfo()
-WriteInstalledPackages()
+# MSstats Packages
+library(MSstats)
+library(MSstatsPTM)
 
-# Package versions
-# MSstats version 4.10.0
-# MSstatsTMT version 2.10.0
-# MSstatsPTM version 2.4.1
+# EnrichR Complex Heatmap Package
+library (ComplexHeatmap)
+
+# Krogan Lab Utility Functions- Load From GitHub
+utils <- "https://raw.githubusercontent.com/HuttenhainLab/bp_utils/master/"
+source(paste0(utils, "enrichmentTestFunctions.R"))
+source(paste0(utils,"MSstats_V4_Functions.R"))
+
+# Dain Utility Functions - Load From GitHub
+#drb_utils <- "C:/Users/dainb/OneDrive/Documents/GitHub/drb_utils/"
+drb_utils <- "https://raw.githubusercontent.com/HuttenhainLab/drb_utils/main/"
+source(paste0(drb_utils,"data_management.R"))
+source(paste0(drb_utils,"spectronaut_data_cleaning.R"))
+source(paste0(drb_utils,"gene_ontology_enrichment.R"))
+source(paste0(drb_utils,"phosphokinase_enrichment_analysis.R"))
+
 ```
 
 # Pipeline Parameters
+
 Enter in values specific to your dataset in this block and run all blocks of code sequentially.
+
 ```{r}
 # Data Type
 # SP - Spectronaut
 # MQ - MaxQuant
-export.type <- "MQ" 
+export.type <- "SP" 
 
-dataType <- "Abundance"
-dataName <- "AM_Beadtest01"
+# Appended to all exported data/figures
+data.name <- "DRB_LFQ"
+
+# create subdirectories to store intermediate tables and figures
+Create.Pipeline.Directories(data.name)
+
+# Pipeline considers samples with the same "Replicate/BioReplicate" column to be biological replicates i.e. from the same patient
+  # This is not true for a typical APEX experiment where we instead have technical replicates
+  # If `is.case.control` = TRUE, pipeline will make replicate column unique by concatenating Condition & Replicate columns
+  # If FALSE, pipeline will leave replicate columns as-is. 
+  # This will impact the statistical model either way.
+is.case.control = TRUE
 
 # File paths to your mass spec data in either MaxQuant or Spectronaut format
 if (export.type == "SP") {
@@ -122,7 +145,6 @@ global.regexContrasts <- c("ctrl_40-0min_40", "ctrl_40-5min_40", "0min_40-5min_4
                     "ctrl_70-0min_70", "ctrl_70-5min_70", "0min_70-5min_70",
                     "ctrl_80-0min_80", "ctrl_80-5min_80", "0min_80-5min_80")
 
-experiment.regexContrasts <- c("0min_40-5min_40", "0min_50-5min_50", "0min_60-5min_60", "0min_70-5min_70", "0min_80-5min_80")
 
 # Sometimes you want to remove certain runs because they're bad, or before data normalization. 
 # You can also do this at the condition level for ease, but you'll need to modify the code in the post-normalization section to do this
@@ -147,7 +169,9 @@ if (export.type == "SP") {
 ```
 
 ### Clean data
+
 It's recommended to include commonly observed contaminant proteins when processing your proteomic datasets. However, Spectronaut does not remove these entries for you. Fortunately, all contaminant protein accessions are prepended with the text **Cont\_** so we can go through each row in our dataset and toss that data ourselves.
+
 ```{r}
 if (export.type == "SP") {
   # remove all contaminant proteins.
@@ -167,7 +191,7 @@ if (export.type == "SP") {
 
 During data processing via msStats most of the metadata we'd like to include for visualization or functional enrichment analysis is discarded. I find it useful to create a linker table early on containing all the metadata I want to crossmap back in based on a unique identifier. The best one I've found is the Uniprot accession ID column AKA **PG.ProteinAccession**.
 
-``` {r}
+```{r}
 
 # Spectronaut specific protein linker table
 if (export.type == "SP") {
@@ -190,24 +214,37 @@ proteinNameCrossLookup <- proteinNameCrossLookup %>% distinct(Protein, .keep_all
 
 ```
 
+### Make Replicate column unique if set
+
+This prevents MSstats from treating experimental/technical replicates as bioreplicates. Bioreplicates are modeled differently within the statistical framework.
+
+```{r}
+if (is.case.control) {
+  spectronaut.lfq.report$R.Replicate <- paste(spectronaut.lfq.report$R.Condition, spectronaut.lfq.report$R.Replicate, sep = ".")
+}
+```
 
 ### Reformat data for msStats Data Processing
 
-Most proteomic pipelines by default do not export data in the format that msStat expects for protein grouping and normalization. Fortunately for us, msStats already has a built-in converter function that we can take advantage of with minimal effort. While it's not the worst thing to reformat this data ourselves, work smarter, not harder. 
+Most proteomic pipelines by default do not export data in the format that msStat expects for protein grouping and normalization. Fortunately for us, msStats already has a built-in converter function that we can take advantage of with minimal effort. While it's not the worst thing to reformat this data ourselves, work smarter, not harder.
 
 After this stage, we will no longer need to write special code to handle Spectronaut vs MaxQuant data
 
-``` {r}
+```{r}
 if (export.type == "SP") {
   
   # the optional arguments are recommended in the msStats user guide. Feel free to change if you know better.
   global.prepared <- SpectronauttoMSstatsFormat(spectronaut.lfq.report,
                                        filter_with_Qvalue = TRUE, ## same as default
                                        qvalue_cutoff = 0.01, ## same as default
-                                       removeProtein_with1Feature = TRUE,
-                                       use_log_file = FALSE)
+                                       removeProtein_with1Feature = FALSE,
+                                       use_log_file = FALSE
+                                       )
   
   rm(spectronaut.lfq.report)
+  
+  Save.Csv.With.Timestamp(global.prepared, "CleanedPreprocessedData.csv", paste(data.name, "data", sep = "_"))
+                          
 } else if (export.type == "MQ") {
   
   global.prepared <- MaxQtoMSstatsFormat(maxquant.evidence, 
@@ -223,36 +260,43 @@ if (export.type == "SP") {
 
 Now is a good time to take a look at the raw data.
 
+### View a distribution of the peptide ion transitions.
+
+This should be monomodal after the *SpectronauttoMSstatsFormat* filtering step
+
 ```{r}
 hist(log2(global.prepared$Intensity), breaks = 100)
 ```
 
+### Count unique peptides per experimental condition
 ```{r}
 unique_counts <- as.data.table(global.prepared) %>%
   filter(!is.na(Intensity)) %>%
-  group_by(Condition) %>%
+  filter(Intensity != 0) %>%
+  group_by(BioReplicate) %>%
   summarize(Unique_Peptide_Count = n_distinct(PeptideSequence))
 
-ggplot(unique_counts, aes(x = Condition, y = Unique_Peptide_Count)) +
+ggplot(unique_counts, aes(x = BioReplicate, y = Unique_Peptide_Count)) +
   geom_bar(stat = "identity", fill = "skyblue", width = 0.5) +
-  labs(title = "Unique Transitions / Peptide Sequences per Condition",
-       x = "Condition",
+  geom_text(aes(label = Unique_Peptide_Count), vjust = 1, color = "black", size = 3) +
+  labs(title = "Unique Transitions / Peptide Sequences per Replicate",
+       x = "Replicate",
        y = "Number of Unique Transitions / Peptide Sequences") +
-  geom_vline(xintercept = 5.5, linetype = "dashed", color = "darkgray") +
-  geom_vline(xintercept = 10.5, linetype = "dashed", color = "darkgray") +
-  rotate.x.axis.text
+  rotate.x.axis.text +
+  theme_bw()
 
-ggsave("./UniqueTransitionOrPeptideSequencesPerCondition.pdf")
+ggsave(paste(paste(data.name, "figures", sep = "_"), "UniqueFeaturesPerReplicate.pdf", sep = "/"))
 ```
 
+### Get boxplot of quantitative values per sample
 ```{r}
-ggplot (data = global.prepared, aes (x = paste0(Condition, "_", BioReplicate),
+ggplot (data = global.prepared, aes (x = paste0(BioReplicate),
                           y = log10(Intensity), 
                           fill = Condition)) + 
   geom_boxplot() +
   rotate.x.axis.text # this is defined in the default template of all my Rmd files
 
-ggsave("FeatureIntensitiesPerSample.svg")
+ggsave(paste(paste(data.name, "figures", sep = "_"), "FeatureIntensitiesPerSample.pdf", sep = "/"))
 ```
 
 # Use MSstats for protein summarization
@@ -266,15 +310,25 @@ global.proteinSummarization = MSstats::dataProcess(global.prepared,
                                featureSubset = 'highQuality',				
                                summaryMethod="TMP",
                                censoredInt='NA',				
-                               MBimpute=TRUE,				
+                               MBimpute=FALSE,				
                                maxQuantileforCensored=0.999)
+
+Save.Csv.With.Timestamp(global.proteinSummarization$FeatureLevelData, "FeatureLevelData.csv", paste(data.name, "data", sep = "_"))
+Save.Csv.With.Timestamp(global.proteinSummarization$ProteinLevelData, "ProteinLevelData.csv", paste(data.name, "data", sep = "_"))
 ```
 
+# (Optional) Reload DataProcess results
+If you ever want to go back & reanalyze data after the data process function, it can be frustrating to have to run through the entire pipeline again up to this point. 
 ```{r}
+# global.proteinSummarization <- list(ProteinLevelData = NULL, FeatureLevelData = NULL)
 
-# Save feature and Protein -level data from MsStats output
-fwrite (global.proteinSummarization$FeatureLevelData, ScriptAndDatedFileName(paste(dataName,dataType,"NonNormalized_FeatureLevelData.csv.gz",sep = "_")))
-fwrite (global.proteinSummarization$ProteinLevelData, ScriptAndDatedFileName(paste(dataName,dataType,"NonNormalized_ProteinLevelData.csv.gz", sep = "_")))
+# global.proteinSummarization$ProteinLevelData <- fread(paste0(paste(data.name, "data/", sep = "_"), "20240326_ProteinLevelData.csv"))
+# global.proteinSummarization$FeatureLevelData <- fread(paste0(paste(data.name, "data/", sep = "_"), "20240326_FeatureLevelData.csv"))
+
+# global.proteinSummarization$ProteinLevelData$RUN <- factor(global.proteinSummarization$ProteinLevelData$RUN)
+# global.proteinSummarization$ProteinLevelData$Protein <- factor(global.proteinSummarization$ProteinLevelData$Protein)
+# global.proteinSummarization$ProteinLevelData$GROUP <- factor(global.proteinSummarization$ProteinLevelData$GROUP)
+
 ```
 
 # Plot protein intensities pre-normalization
@@ -284,8 +338,14 @@ All of our peptide-level data has now been summarized into protein groups. Let's
 ```{r}
 
 ggplot (global.proteinSummarization$ProteinLevelData, 
-        aes (x = interaction ( SUBJECT, GROUP), y = LogIntensities, fill = GROUP)) + geom_boxplot() + rotate.x.axis.text
-ggsave("ProteinIntensities_PreNormalization.svg")
+        aes (x = interaction (SUBJECT, GROUP), 
+             y = LogIntensities, 
+             fill = GROUP)
+        ) + 
+  geom_boxplot() + 
+  rotate.x.axis.text
+
+ggsave(paste(paste(data.name, "figures", sep = "_"), "ProteinIntensitiesPerSample.pdf", sep = "/"))
 
 ```
 
@@ -304,7 +364,7 @@ ggplot(unique_counts, aes(x = GROUP, y = Unique_Protein_Count)) +
   geom_vline(xintercept = 10.5, linetype = "dashed", color = "darkgray") +
   rotate.x.axis.text
 
-ggsave("./UniqueProteinGroupsPerCondition.pdf")
+ggsave(paste(paste(data.name, "figures", sep = "_"), "UniqueProteinGroupsPerCondition.pdf", sep = "/"))
 ```
 
 # Plot average protein CVs per condition
@@ -322,7 +382,7 @@ ggplot(proteomics_data, aes(x = GROUP, y = CV)) +
        y = "Coefficient of Variation (%)") +
   rotate.x.axis.text
 
-ggsave("./PreNormalization_ProteinCVs.pdf")
+ggsave(paste(paste(data.name, "figures", sep = "_"), "ProteinCVs.pdf", sep = "/"))
 ```
 
 # Native Carboxylase Enrichment
@@ -362,7 +422,7 @@ ggplot(test, aes(x = Protein, y = LogIntensities, fill = GROUP)) +
        x = "GROUP", y = "Log Intensities") +
   theme_bw()
 
-ggsave("NativeCarboxylases_preNormalization.svg")
+ggsave(paste(paste(data.name, "figures", sep = "_"), "NativeCarboxylases.pdf", sep = "/"))
 
 rm(biotin.carboxylases.up, test)
 ```
@@ -371,14 +431,7 @@ rm(biotin.carboxylases.up, test)
 
 Another way you can check for successful APEX enrichment is to make volcano plots comparing protein abundances between non-BP vs BP conditions. What you should see is a mass up-regulation of most proteins. If you don't see that, your enrichment likely didn't work, or you have a ton of background binding. To make these comparisons, we can use the GroupComparison function from msStats. To use this function, you need the output from MSstats::DataProcess, and you also have to build a contrast matrix, essentially a numerical vector indicating what experimental conditions you want to compare.
 
-The first thing I like to do is get the ordered list of experimental conditions from the MsStats output. It makes it easier for me to visualize all the experimental conditions in the study, and I base my contrast matrix around the order of this list. You need to stipulate all the conditions that you DataProcess'd together. You unfortunately can't just subselect a handful.
-
-```{r}
-global.orderedConditions <- levels(global.proteinSummarization$ProteinLevelData$GROUP)
-cat(global.orderedConditions)
-```
-
-Angelina wants a pairwise comparison for all possible conditions. Use Ben Polacco's *makeContrast* function to help build the group comparison matrix without errors. Again, you can do this yourself if you're careful without using this function.
+Use Ben Polacco's *makeContrast* function to help build the group comparison matrix without errors. Again, you can do this yourself if you're careful without using this function.
 
 ```{r}
 
@@ -387,17 +440,13 @@ source (paste0(utils,"MSstats_V4_Functions.R"))
 # makes an MsStats-compatible contrast matrix using the condition comparisons in the parameter block
 contrast.matrix <- makeContrast.regEx ( regEx = global.regexContrasts,
                                     mssQ = global.proteinSummarization)
-
-# create time stamped file
-resultsFile <- ScriptAndDatedFileName(paste(dataName,dataType,"GroupComparisonResult.csv", sep = "_"))
-#optional if not running as job
-save ( "global.proteinSummarization", "contrast.matrix", "resultsFile", file = ScriptAndDatedFileName(paste(dataName,dataType, "inputGroupComparison.Rdata", sep = "_")))
-
 # Model-based comparison
 # Do pairwise comparison via MSstats using the provide contrast matrix, then select the comparison results
 
 global.pairwiseComparison <- MSstats::groupComparison(contrast.matrix, global.proteinSummarization)$ComparisonResult
 global.pairwiseComparison <- merge(global.pairwiseComparison, proteinNameCrossLookup, by = "Protein", all.x = TRUE)
+
+Save.Csv.With.Timestamp(global.pairwiseComparison, "GroupComparisonsData.csv", paste(data.name, "data", sep = "_"))
 
 ```
 
@@ -457,199 +506,4 @@ lapply(global.regexContrasts, function(comparison) {
   ggsave(paste("./VolcanoPlot", paste(comparison, ".pdf", sep = ""), sep = "_"))
 })
 
-
-```
-
-Great! From these results, we can definitely see that our APEX labeling worked! If we didn't see a bunch of proteins with large Log2 fold change values, we'd know something went wrong with our labeling.
-
-# Now for the actual experimental comparisons
-
-Okay, so we confirmed the APEX labeling worked using our no-BP controls. Now to make the comparisons we're actually interested in, we need to go back to our original dataset, toss out the no-bp controls, then do the pairwise comparisons all over again WITH median normalization enabled this time.
-
-```{r}
-
-experiment.ConditionSubset <- global.prepared[!(global.prepared$Run %in% runs.to.remove), ]
-
-experiment.msstatsResults <- MSstats::dataProcess(experiment.ConditionSubset,
-                                                  normalization = "EQUALIZEMEDIANS",
-                                                  featureSubset = "highQuality",
-                                                  censoredInt="0",
-                                                  MBimpute=TRUE,
-                                                  maxQuantileforCensored=0.999 )
-
-```
-
-```{r}
-
-# Save feature and Protein -level data from MsStats output
-fwrite (experiment.msstatsResults$FeatureLevelData, ScriptAndDatedFileName(paste(dataName,dataType,"Normalized_FeatureLevelData.csv.gz",sep = "_")))
-fwrite (experiment.msstatsResults$ProteinLevelData, ScriptAndDatedFileName(paste(dataName,dataType,"Normalized_ProteinLevelData.csv.gz", sep = "_")))
-```
-
-# Plot protein intensities pre-normalization
-
-All of our peptide-level data has now been summarized into protein groups. Let's inspect the intensity distributions of this data. Note: the data process function already log2 transformed this data, so we don't have to ourselves.
-
-```{r}
-
-ggplot (experiment.msstatsResults$ProteinLevelData, 
-        aes (x = interaction ( SUBJECT, GROUP), y = LogIntensities, fill = GROUP)) + geom_boxplot() + rotate.x.axis.text
-ggsave("ProteinIntensities_PostNormalization.svg")
-
-```
-
-```{r}
-unique_counts <- experiment.msstatsResults$ProteinLevelData %>%
-  filter(!is.na(LogIntensities)) %>%
-  group_by(GROUP) %>%
-  summarize(Unique_Protein_Count = n_distinct(Protein))
-
-ggplot(unique_counts, aes(x = GROUP, y = Unique_Protein_Count)) +
-  geom_bar(stat = "identity", fill = "skyblue", width = 0.5) +
-  labs(title = "Count of Protein Groups per Condition",
-       x = "Condition",
-       y = "Number of Protein Groups") +
-  geom_vline(xintercept = 5.5, linetype = "dashed", color = "darkgray") +
-  geom_vline(xintercept = 10.5, linetype = "dashed", color = "darkgray") +
-  rotate.x.axis.text
-
-ggsave("./UniqueProteinGroupsPerCondition.pdf")
-```
-
-# Plot average protein CVs per condition
-
-```{r}
-proteomics_data <- experiment.msstatsResults$ProteinLevelData %>%
-  group_by(GROUP, Protein) %>%
-  summarize(CV = sd(LogIntensities) / mean(LogIntensities) * 100)
-
-# Plot the distribution of CV for each group
-ggplot(proteomics_data, aes(x = GROUP, y = CV)) +
-  geom_boxplot() +
-  labs(title = "Coefficient of Variation Distribution by Group",
-       x = "Please note CV's were calculated in Log2 space, not raw intensities",
-       y = "Coefficient of Variation (%)") +
-  rotate.x.axis.text
-
-ggsave("./PostNormalization_ProteinCVs.pdf")
-```
-
-# Native Carboxylase Enrichment
-
-```{r}
-
-biotin.carboxylases.up <- c("O00763","P05165","P11498","Q13085","Q96RQ3")
-
-test <- as.data.table(experiment.msstatsResults$ProteinLevelData)
-test <- test[grepl(paste(biotin.carboxylases.up, collapse = "|"), test$Protein), ]
-
-# Plotting code
-ggplot(test, aes(x = Protein, y = LogIntensities, fill = GROUP)) +
-  stat_summary(
-    fun.data = mean_sdl,
-    fun.args = list(mult = 1),
-    geom = "bar",
-    position = position_dodge(width = 0.8),  # Adjust the width as needed
-    width = 0.6  # Adjust the width of bars
-  ) +
-  stat_summary(
-    fun.data = mean_sdl,
-    fun.args = list(mult = 1),
-    geom = "errorbar",
-    position = position_dodge(width = 0.8),
-    width = 0.4  # Adjust the width of error bars
-  ) +
-  labs(title = "Mean Log Intensities with Standard Deviation by GROUP",
-       x = "GROUP", y = "Log Intensities") +
-  theme_bw()
-
-ggsave("NativeCarboxylases_postNormalization.svg")
-
-rm(biotin.carboxylases.up, test)
-```
-
-# Do global pairwise comparisons to check for successful APEX enrichment
-
-```{r}
-experiment.orderedConditions <- levels(experiment.msstatsResults$ProteinLevelData$GROUP)
-cat(global.orderedConditions)
-
-```
-
-We want to do a pairwise comparison for all possible conditions. Use Ben Polacco's *makeContrast* function to help build the group comparison matrix without errors. You can bind your own contrast matrix manually, but the process is very detail oriented and mistakes can be easily made.
-
-```{r}
-
-source (paste0(utils,"MSstats_V4_Functions.R"))
-
-# makes an MsStats-compatible contrast matrix using the condition comparisons in the parameter block
-contrast.matrix <- makeContrast.regEx ( regEx = experiment.regexContrasts,
-                                    mssQ = experiment.msstatsResults)
-
-# create time stamped file
-resultsFile <- ScriptAndDatedFileName(paste(dataName,dataType,"PostNormalization_GroupComparisonResult.csv", sep = "_"))
-#optional if not running as job
-save ( "experiment.msstatsResults", "contrast.matrix", "resultsFile", file = ScriptAndDatedFileName(paste(dataName,dataType, "postNormalization_inputGroupComparison.Rdata", sep = "_")))
-
-# Model-based comparison
-# Do pairwise comparison via MSstats using the provide contrast matrix, then select the comparison results
-
-experiment.pairwiseComparison <- MSstats::groupComparison(contrast.matrix, experiment.msstatsResults)$ComparisonResult
-experiment.pairwiseComparison <- merge(experiment.pairwiseComparison, proteinNameCrossLookup, by = "Protein", all.x = TRUE)
-
-```
-
-# Volcano Plots
-
-```{r}
-
-# This is essentially a foreach loop. 
-# Takes each of the labels of the above pairwise comparison
-# Subselects that specific data
-# Finally, makes the volcano plot
-lapply(experiment.regexContrasts, function(comparison) {
-  
-  # define significant proteins
-  thisPairwiseComparison <- as.data.table(experiment.pairwiseComparison %>% filter(Label == comparison))
-  
-  # Merge human readable protein names in case they're not there.
-  
-  ## This chunks adds a new column to our pairwise comparison data table
-  # For all proteins with |Log2FC| < 1 and pval > 0.05, value is "Not"
-  # For proteins with |Log2FC| >= 1 and pval <= 0.05, value is "Up" or "Down" as appropriate
-  thisPairwiseComparison[, Significance := "Not"]
-  thisPairwiseComparison[pvalue < 0.05 & abs(log2FC) > log2(1.5),
-         Significance := ifelse (log2FC > 0, "Up", "Down")]
-  
-  ## Render volcano plots. Highlight arrestin and adrenoceptor beta 2
-  ggplot(thisPairwiseComparison, aes(x = log2FC, y = -log10(pvalue), color = Significance, label = ProteinName)) +
-    
-    # significance labels and lines
-    # vertical lines
-    geom_vline(xintercept = c(-log2(1.5), log2(1.5)), linetype = "dashed", color = "darkgray") +
-    annotate("text", x = c(-log2(1.5), log2(1.5)), y = 0, label = c("-Log2(1.5)", "Log2(1.5)"), vjust = 1, hjust = 0.5, color = "darkgray") +
-    
-    # horizontal line
-    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "darkgray") +
-    annotate("text", x = Inf, y = -log10(0.05), label = "p-val=0.05", hjust = 1, color = "darkgray") +
-  
-    # circles representing proteins
-    geom_point() +
-    scale_color_manual(values = c(Not = "gray", Down = "blue", Up = "red")) +
-    ggrepel::geom_text_repel(data = thisPairwiseComparison[Significance != "Not"], size = 2, max.overlaps = 20) +
-    
-    # highlight people's favorite protein
-    geom_point(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ARRB2;DKFZp686L0365", ],
-               aes(x = log2FC, y = -log10(pvalue)), color = "green", size = 3) +
-    geom_text_repel(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ARRB2;DKFZp686L0365", ],
-                    aes(x = log2FC, y = -log10(pvalue)), label = "ARRB2_HUMAN", color = "green", size = 3, box.padding = 0.5) +
-    
-    geom_point(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "EEA1", ],
-               aes(x = log2FC, y = -log10(pvalue)), color = "green", size = 3) +
-    geom_text_repel(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "EEA1", ],
-                    aes(x = log2FC, y = -log10(pvalue)), label = "EEA1_HUMAN", color = "green", size = 3, box.padding = 0.5) +
-    theme_bw()
-  
-  ggsave(paste("./postNormalization_VolcanoPlot", paste(comparison, ".pdf", sep = ""), sep = "_"))
-})
 ```
