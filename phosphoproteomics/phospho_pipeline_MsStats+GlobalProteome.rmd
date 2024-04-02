@@ -1,0 +1,773 @@
+---
+title: "phospho_pipeline_MsStatsPTM"
+author: "Dain Brademan"
+date: "2024-02-25"
+output: html_document
+---
+
+# Load Packages & Configure Project
+
+Now that in theory everything is installed. Let's load our packages. If you get any errors regarding **Package not found**, just go back and install it! A general rule is the fully lowercase libraries are from CRAN and the CamelCase libraries are from BioConductor
+
+```{r}
+# Load Packages
+library(MSstats)
+library(MSstatsPTM)
+library(dplyr)
+library(R.utils) # Actually a cran package
+library(dplyr)
+library(svglite)
+library (data.table)
+library (ComplexHeatmap) # not needed in this code
+library (circlize)
+library (ggplot2)
+rotate.x.axis.text <- theme(axis.text.x = element_text(angle = 90,vjust = 0.5, hjust=1))
+library (magrittr)
+library (pbapply)
+library(ggrepel)
+library(plotly)
+
+# Krogan Lab Utility Functions
+utils <- "C:/Users/dainb/OneDrive/Documents/GitHub/bp_utils/"
+source(paste0(utils,"ManageScriptData.R"))
+source(paste0(utils, "enrichmentTestFunctions.R"))
+source (paste0(utils,"MSstats_V4_Functions.R"))
+source(paste0(utils,"KinaseActivityScores.R"))       
+WriteSessionInfo()
+WriteInstalledPackages()
+
+# Dain Utility Functions
+drb_utils <- "C:/Users/dainb/OneDrive/Documents/GitHub/drb_utils/"
+source(paste0(drb_utils,"data_management.R"))
+source(paste0(drb_utils,"spectronaut_data_cleaning.R"))
+source(paste0(drb_utils,"gene_ontology_enrichment.R"))
+source(paste0(drb_utils,"phosphokinase_enrichment_analysis.R"))
+
+# Package versions
+# MSstats version 4.10.0
+# MSstatsTMT version 2.10.0
+# MSstatsPTM version 2.4.1
+```
+
+### Assign experiment-specific variables
+```{r}
+# Data Type
+# SP - Spectronaut
+# MQ - MaxQuant
+export.type <- "SP" 
+
+dataType <- "PH"
+dataName <- "MG05_3ul"
+
+filter.ptm.score <- 0.75   # default 0.75, Class 1 Phosphopeptides.
+# filter.ptm.frequency <- 10 # The number of times a 
+
+# File paths to your mass spec data in either MaxQuant or Spectronaut format
+if (export.type == "SP") {
+  # Spectronaut specific parameters
+  # PUT THE PHOSPHO SPECTRONAUT EXPORT BELOW
+  spectronaut.phospho.report <- "../../data/MG05_3ul_MsStatsPTM.tsv"
+  spectronaut.phospho.annotations <- "../../data/annotations_global.csv"
+  
+  # If you have abundance proteomics, specify it here. Otherwise leave it as an empty string "".
+  # PUT THE ABUNDANCE SPECTRONAUT EXPORT BELOW
+  spectronaut.globalproteome.report <- "../../data/MG05A_StandardTolerances_Report.tsv"
+} else if (export.type == "MQ") {
+  maxquant.evidence <- "../example_data/example_data_MQ_evidence.txt"
+  maxquant.proteingroups <- "../example_data/example_data_MQ_proteinGroups.txt"
+  maxquant.annotations <- "../example_data/example_data_MQ_annotations.csv"
+} else {
+  stop("Non-supported data type. Make sure data type is SP or MQ, otherwise pipeline will break.")
+}
+```
+
+### Assign group comparisons 
+```{r}
+# Names of all possible contrasts will be generated from Condition names (formatted "ConditionName1-ConditionName2")
+  ## Example: regexContrasts <- c("Fsk-DMSO", "H2O2_Fsk-Fsk", "H2O2-DMSO", "H2O2_Fsk-H2O2")
+  ## This list should be strings that match your exact condition names that you entered in Spectronaut. 
+  ## You can also use RegEex terms if you know what you're doing, but I find it more exact to use full condition names to avoid accidental RegEx matches
+qc.regexContrasts <- c("Fsk-DMSO",
+                        "H2O2-DMSO",
+                        "H2O2_Fsk-Fsk",
+                        "H2O2_Fsk-H2O2")
+
+# Sometimes you want to remove certain runs because they're bad, or before data normalization. 
+# You can also do this at the condition level for ease, but you'll need to modify the code in the post-normalization section to do this
+# Specify the runs here. 
+# Removing 'TT000121_MW2-04' as it has like 95% missing values.
+runs.to.remove <- c()
+
+# Create data directory to store processed data and figures
+output.data.folder <- "./processed_data/"
+output.figure.folder <- "./figures/"
+if (!dir.exists(output.data.folder)) {
+  dir.create(output.data.folder)
+}
+
+if (!dir.exists(output.figure.folder)) {
+  dir.create(output.figure.folder)
+}
+
+```
+
+```{r}
+# Spectronaut specific data files
+if (export.type == "SP") {
+  spectronaut.phospho.report <- fread(spectronaut.phospho.report)
+  
+  if (spectronaut.globalproteome.report != "") {
+    spectronaut.globalproteome.report <- fread(spectronaut.globalproteome.report)
+  }
+  
+# MaxQuant specific data files
+} else if (export.type == "MQ") {
+  maxquant.evidence <- fread(maxquant.evidence)
+  maxquant.proteingroups <- fread(maxquant.proteingroups)
+  maxquant.annotations <- fread(maxquant.annotations)
+}
+```
+
+# Clean raw data
+
+### Remove Contaminant Peptides
+It's recommended to include commonly observed contaminant proteins when processing your proteomic datasets. However, Spectronaut does not remove these entries for you. Fortunately, all contaminant protein accessions are prepended with the text **Cont\_** so we can go through each row in our dataset and toss that data ourselves.
+```{r}
+if (export.type == "SP") {
+  # Removes any protein starting with the substring "Cont_"
+  spectronaut.phospho.report <- Spectronaut_RemoveContaminantProteins(spectronaut.phospho.report)
+  
+  if (is.data.table(spectronaut.globalproteome.report)) {
+    spectronaut.globalproteome.report <- Spectronaut_RemoveContaminantProteins(spectronaut.globalproteome.report)
+  }
+}
+```
+
+# Remove low-scoring phospho hits.
+When a phosphopeptide is identified, there is a localization score reported for the probability that the reported site is correct. This localization probability can be broken down into several classes:
+ -    Class I, localization prob ≥ 0.75
+ -    Class II, localization prob ≥ 0.50
+ -    Class III, localization prob ≥ 0.25
+ 
+It is common to filter phospho hits to just Class I entries when doing biological followup, which we will do here. 
+```{r}
+if (export.type == "SP") {
+  phospho.string <- c("Phospho \\(STY\\)")
+  
+  spectronaut.phospho.report <- Spectronaut_FilterPTMs(spectronaut.phospho.report, 
+                                                       retain.unmodified.peptides = TRUE,
+                                                       ptm.strings = phospho.string,        # c("Phospho \\(STY\\)")
+                                                       filter.ptm.score = filter.ptm.score, # 0.75 from above
+                                                       filter.ptm.frequency = 1
+                                                       )
+  rm (phospho.string)
+}
+# Write out the cleaned data
+fwrite (spectronaut.phospho.report, paste(output.data.folder, "pipeline_export_cleaned.csv"))
+```
+
+
+### Make protein metadata linker table
+
+During data processing via msStats most of the metadata we'd like to include for visualization or functional enrichment analysis is discarded. I find it useful to create a linker table early on containing all the metadata I want to crossmap back in based on a unique identifier. The best one I've found is the Uniprot accession ID column AKA **PG.ProteinAccession**.
+
+``` {r}
+
+# Spectronaut specific protein linker table
+if (export.type == "SP") {
+  
+  # scrape a linker table for Uniprot IDs and Protein Names for later visualization
+  proteinNameCrossLookup <- subset(spectronaut.phospho.report, select = c(PG.ProteinGroups, PG.ProteinNames))
+  
+# MaxQuant specific protein linker table
+} else if (export.type == "MQ") {
+  
+  # scrape a linker table for Uniprot IDs and Protein Names for later visualization
+  proteinNameCrossLookup <- subset(maxquant.proteingroups, select = c(`Protein IDs`, `Gene names`))
+}
+
+# rename columns for easy merging later
+colnames(proteinNameCrossLookup) <- c("Protein", "ProteinName")
+
+# filter to distinct protein IDs. %>% is an operator from the package magrittr which can be used to chain multiple functions together.
+proteinNameCrossLookup <- proteinNameCrossLookup %>% distinct(Protein, .keep_all = TRUE)
+
+```
+
+### Do MsStatsPTM Preprocessing
+```{r}
+if (is.data.table(spectronaut.globalproteome.report)) {
+  
+  # Do preprocessing using separate global proteomics dataset to adjust phospho abundance
+  experiment.converted.data <- SpectronauttoMSstatsPTMFormat(
+                                                  input = spectronaut.phospho.report,
+                                                  annotation = spectronaut.phospho.annotations,
+                                                  fasta_path="../../data/Human_Canonical.fasta",
+                                                  protein_input =  spectronaut.globalproteome.report,
+                                                  mod_id = "\\[Phospho \\(STY\\)\\]")
+  
+  rm(spectronaut.globalproteome.report)
+}
+# } else {
+#   
+#   # Do preprocessing just with phospho output
+#   experiment.converted.data <- SpectronauttoMSstatsPTMFormat(spectronaut.phospho.report,
+#                                                   annotation = spectronaut.phospho.annotations,
+#                                                   fasta_path="../data/Human_Canonical.fasta",
+#                                                   use_unmod_peptides = TRUE,
+#                                                   mod_id = "\\[Phospho \\(STY\\)\\]")
+# }
+
+
+fwrite (experiment.converted.data$PTM, paste(output.data.folder, "MsStats_PTM_Format.csv"))
+fwrite (experiment.converted.data$PROTEIN, paste(output.data.folder, "MsStats_PROTEIN_Format.csv"))
+
+# delete old data from memory
+rm(spectronaut.phospho.report)
+```
+### Do MsStatsPTM summarization to proteins
+```{r}
+
+experiment.dataProcessed = dataSummarizationPTM(experiment.converted.data, 
+                                          verbose = FALSE, 
+                                          use_log_file = FALSE, 
+                                          append = FALSE)
+
+fwrite (experiment.dataProcessed$PTM$ProteinLevelData, paste(output.data.folder, "MsStats_PTM_dataProcessed_ProteinLevelData.csv"))
+fwrite (experiment.dataProcessed$PTM$FeatureLevelData, paste(output.data.folder, "MsStats_PTM_dataProcessed_FeatureLevelData.csv"))
+
+fwrite (experiment.dataProcessed$PROTEIN$ProteinLevelData, paste(output.data.folder, "MsStats_PROTEIN_dataProcessed_ProteinLevelData.csv"))
+fwrite (experiment.dataProcessed$PROTEIN$FeatureLevelData, paste(output.data.folder, "MsStats_PROTEIN_dataProcessed_FeatureLevelData.csv"))
+
+rm(experiment.converted.data)
+
+```
+
+### Data Process Plots
+```{R}
+dataProcessPlotsPTM(experiment.dataProcessed,
+                    type = 'QCPLOT',
+                    which.PTM = "allonly",
+                    address = FALSE)
+```
+
+### Group Comparison PTM
+
+```{r}
+# Generate Contrast Matrix for group comparison
+contrast.matrix <- Make.PTM.Contrast.Matrix (input.data.frame = experiment.dataProcessed, 
+                                              condition.vector = qc.regexContrasts,
+                                              exact.match = TRUE)
+
+
+experiment.group.comparisons = groupComparisonPTM(experiment.dataProcessed,
+                                      data.type = "LabelFree",
+                                      contrast.matrix = contrast.matrix,
+                                      use_log_file = FALSE, 
+                                      append = FALSE,
+                                      verbose = FALSE)
+
+fwrite (experiment.group.comparisons$PTM.Model, paste(output.data.folder, "MsStats_GroupComparison_PTM.csv"))
+fwrite (experiment.group.comparisons$PROTEIN.Model, paste(output.data.folder, "MsStats_GroupComparison_PROTEIN.csv"))
+fwrite (experiment.group.comparisons$ADJUSTED.Model, paste(output.data.folder, "MsStats_GroupComparison_ADJUSTED.csv"))
+
+#rm(experiment.dataProcessed)
+```
+
+
+
+
+data wrangling for plotting...
+```{r}
+plottableData <- list(PTM.Model = experiment.group.comparisons$PTM.Model, PROTEIN.Model = experiment.group.comparisons$PROTEIN.Model, ADJUSTED.Model = experiment.group.comparisons$ADJUSTED.Model)
+
+# get unsitified protein IDs
+plottableData$PTM.Model$Protein.No.Site <- sapply(strsplit(as.character(plottableData$PTM.Model$Protein), "_"), function(x) x[1])
+plottableData$PROTEIN.Model$Protein.No.Site <- sapply(strsplit(as.character(plottableData$PROTEIN.Model$Protein), "_"), function(x) x[1])
+plottableData$ADJUSTED.Model$Protein.No.Site <- sapply(strsplit(as.character(plottableData$ADJUSTED.Model$Protein), "_"), function(x) x[1])
+
+# bind protein names to each groupComparisonTable
+plottableData$PTM.Model <- merge(plottableData$PTM.Model, proteinNameCrossLookup, by.x = "Protein.No.Site", by.y = "Protein", all.x = TRUE)
+plottableData$PROTEIN.Model <- merge(plottableData$PROTEIN.Model, proteinNameCrossLookup, by.x = "Protein.No.Site", by.y = "Protein", all.x = TRUE)
+plottableData$ADJUSTED.Model <- merge(plottableData$ADJUSTED.Model, proteinNameCrossLookup, by.x = "Protein.No.Site", by.y = "Protein", all.x = TRUE)
+
+plottableData$PTM.Model$ProteinName <- sapply(strsplit(as.character(plottableData$PTM.Model$ProteinName), "_"), function(x) x[1])
+plottableData$PROTEIN.Model$ProteinName <- sapply(strsplit(as.character(plottableData$PROTEIN.Model$ProteinName), "_"), function(x) x[1])
+plottableData$ADJUSTED.Model$ProteinName <- sapply(strsplit(as.character(plottableData$ADJUSTED.Model$ProteinName), "_"), function(x) x[1])
+
+plottableData$PTM.Model$Sitified.Protein.Name <- paste(plottableData$PTM.Model$ProteinName, sapply(strsplit(as.character(plottableData$PTM.Model$Protein), "_"), function(x) x[2]), sep = "_")
+plottableData$PROTEIN.Model$Sitified.Protein.Name <- paste(plottableData$PROTEIN.Model$ProteinName, sapply(strsplit(as.character(plottableData$PROTEIN.Model$Protein), "_"), function(x) x[2]), sep = "_")
+plottableData$ADJUSTED.Model$Sitified.Protein.Name <- paste(plottableData$ADJUSTED.Model$ProteinName, sapply(strsplit(as.character(plottableData$ADJUSTED.Model$Protein), "_"), function(x) x[2]), sep = "_")
+```
+
+### Per phosphosite, check avg log2FC difference between Adjusted and PTM
+```{r}
+# Merge the two data frames based on the "Protein" column
+merged_df <- merge(plottableData$PTM.Model, plottableData$ADJUSTED.Model, by = c("Protein", "Label"), suffixes = c("_PTM", "_ADJ"))
+
+# Calculate the difference between the Log2FC values
+merged_df$Log2FC_difference <- merged_df$log2FC_PTM - merged_df$log2FC_ADJ
+```
+
+```{r}
+# Split the PlottableData dataframe by the 'label' column
+label_list <- split(merged_df, merged_df$Label)
+
+# Function to create a ranked-order scatterplot for each label
+create_ranked_order_plot_and_save <- function(df, label) {
+  # Start PDF device
+  pdf(file = paste("Ranked_Order_Scatterplot_", label, ".pdf", sep = ""), width = 8, height = 6)
+  
+  # Order the dataframe by Log2FC_difference
+  df <- df[order(df$Log2FC_difference), ]
+  
+  # Create a ranked-order scatterplot
+  plot(rank(df$Log2FC_difference), df$Log2FC_difference,
+       xlab = "Rank-ordered Log2FC Difference",
+       ylab = "Log2FC Difference",
+       main = paste("Ranked-Order Scatterplot of Log2FC Differences (Label:", label, ")"))
+  
+  # End PDF device
+  dev.off()
+}
+
+# Create ranked-order scatterplots for each label
+for (label in names(label_list)) {
+  create_ranked_order_plot_and_save(label_list[[label]], label)
+}
+
+create_histogram_and_save <- function(df, label) {
+  # Start PDF device
+  pdf(file = paste("Histogram_", label, ".pdf", sep = ""), width = 8, height = 6)
+  
+  # Create a histogram of Log2FC_difference
+  hist(df$Log2FC_difference,
+       main = paste("Histogram of Log2FC Differences (Label:", label, ")"),
+       xlab = "Log2FC Difference", ylab = "Frequency",
+       breaks = 100
+       )
+  
+  # End PDF device
+  dev.off()
+}
+
+# Create histograms for each label and save as PDF
+for (label in names(label_list)) {
+  create_histogram_and_save(label_list[[label]], label)
+}
+
+```
+
+### Volcano Plots
+```{r}
+lapply(qc.regexContrasts, function(comparison) {
+  
+  # define significant proteins
+  thisPairwiseComparison <- as.data.table(plottableData$ADJUSTED.Model %>% filter(Label == comparison))
+  
+  # Merge human readable protein names in case they're not there.
+  
+  ## This chunks adds a new column to our pairwise comparison data table
+  # For all proteins with |Log2FC| < 1 and pval > 0.05, value is "Not"
+  # For proteins with |Log2FC| >= 1 and pval <= 0.05, value is "Up" or "Down" as appropriate
+  thisPairwiseComparison[, Significance := "Not"]
+  thisPairwiseComparison[pvalue < 0.05 & abs(log2FC) > 1,
+         Significance := ifelse (log2FC > 0, "Up", "Down")]
+  
+  thisCondition1 <- strsplit(comparison, '-')[[1]][1]
+  thisCondition2 <- strsplit(comparison, '-')[[1]][2]
+  
+  ## Render volcano plots.
+  ggplot(thisPairwiseComparison, aes(x = log2FC, y = -log10(pvalue), color = Significance)) +
+  
+    # circles representing proteins
+    geom_point() +
+    scale_color_manual(values = c(Not = "gray", Down = "blue", Up = "red")) +
+    labs(x = paste("Phosphosite Abundance - log2FC", thisCondition1, "-", thisCondition2)) +
+    
+    # Highlight your favorite protein / datapoint
+    geom_point(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "CYFP1_HUMAN", ],
+                aes(x = log2FC, y = -log10(pvalue)), color = "black", size = 3) +
+    geom_text_repel(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "CYFP1_HUMAN", ],
+                     aes(x = log2FC, y = -log10(pvalue)), label = "CYFP1_HUMAN", color = "black", size = 3, box.padding = 0.5) +
+    
+   # significance labels and lines
+    # vertical lines
+    geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "darkgray") +
+    annotate("text", x = c(-1.1, 1.1), y = 0, label = c("log2FC = -1", "log2FC = 1"), vjust = 0, hjust = c(1, 0), color = "black") +
+    
+    # horizontal line
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "darkgray") +
+    annotate("text", x = Inf, y = -log10(0.07), label = "pval = 0.05", vjust = 1, hjust = 1, color = "black") +
+    theme_bw()
+  
+  ggsave(paste("./UncorrectedPval_VolcanoPlot", paste(comparison, ".pdf", sep = ""), sep = "_"))
+})
+```
+
+### Heatmaps
+```{r}
+
+# filter for significant changers
+# make heat map
+# Go enrichment on clusters
+pval.cutoff <- 0.05
+FC.cutoff <- 1
+
+# filter all proteins in group comparisons to having at least 1 significant changer in for each of our groups
+Filtered.Sites <- as.data.table(
+  plottableData$ADJUSTED.Model %>% 
+    group_by(Sitified.Protein.Name) %>% 
+    filter(any(adj.pvalue <= pval.cutoff & abs(log2FC) >= FC.cutoff))
+)
+
+Sig.Changing.Site.Matrix <- as.matrix(dcast(Filtered.Sites, Protein ~ Label, value.var = "log2FC"), rownames = "Protein")
+Sig.Changing.Site.Matrix[is.infinite(Sig.Changing.Site.Matrix)] <- 0
+Sig.Changing.Site.Matrix[is.na(Sig.Changing.Site.Matrix)] <- 0
+
+#pdf("HeatMap_ADJUSTED.pdf")
+
+# Now create the heatmap
+
+heatmap <- Heatmap(
+  Sig.Changing.Site.Matrix,
+  row_title = sprintf("%d phosphosites with\nadj.pval < 0.05 & |Log2FC| > 1", nrow(Sig.Changing.Site.Matrix)),
+  name = "Log2FC of Labeled Timepoints\n",
+  show_row_names = FALSE,
+  cluster_columns = TRUE,
+  #km = 4
+)
+
+drawnHeatmap <- draw(heatmap)
+
+#dev.off()
+```
+
+### Go Enrichment
+GO enrichment checks if a subset of your data is enriched for a particular GO term vs your dataset as a whole. This idea isn't exclusive to GO terms, but it relies on expert annotation of everything in your dataset. We mostly trust GO annotations, but again, it's not perfect.
+
+This current analysis is done at the PTM level, not adjusted...
+```{r}
+# only want to load these terms once. It takes a bit to run
+if (!exists("global.go.terms")) {
+  global.go.terms <- Load.GO.Terms.From.Bioconductor()
+}
+
+# This is all the proteins in your dataset.
+dataset.all.proteins <- unique(plottableData$PTM.Model$Protein.No.Site)
+
+# This is the subset of genes that you want to check for term enrichment
+row.dendrogram <- row_dend(drawnHeatmap)
+
+# get indices of clusters of interest based on dendrogram
+cluster1.row.indices <- Dendrogram.Cluster.Get.Original.Indices(row.dendrogram[[2]][[1]][[1]])
+cluster2.row.indices <- Dendrogram.Cluster.Get.Original.Indices(row.dendrogram[[2]][[1]][[1]])
+cluster3.row.indices <- Dendrogram.Cluster.Get.Original.Indices(row.dendrogram[[2]][[2]][[1]])
+cluster4.row.indices <- Dendrogram.Cluster.Get.Original.Indices(row.dendrogram[[2]][[2]][[2]])
+
+# Get sitified proteins from cluster indices, then unsitify and unique them.
+cluster1.proteins <- rownames(Sig.Changing.Site.Matrix)[cluster1.row.indices]
+cluster1.proteins  <- unique(sapply(strsplit(as.character(cluster1.proteins ), "_"), function(x) x[1]))
+
+cluster2.proteins <- rownames(Sig.Changing.Site.Matrix)[cluster2.row.indices]
+cluster2.proteins  <- unique(sapply(strsplit(as.character(cluster2.proteins ), "_"), function(x) x[1]))
+
+cluster3.proteins <- rownames(Sig.Changing.Site.Matrix)[cluster3.row.indices]
+cluster3.proteins  <- unique(sapply(strsplit(as.character(cluster3.proteins ), "_"), function(x) x[1]))
+
+cluster4.proteins <- rownames(Sig.Changing.Site.Matrix)[cluster4.row.indices]
+cluster4.proteins  <- unique(sapply(strsplit(as.character(cluster4.proteins ), "_"), function(x) x[1]))
+
+cluster.list <- list(Cluster_1 = cluster1.proteins, Cluster_2 = cluster2.proteins, Cluster_3 = cluster3.proteins, Cluster_4 = cluster4.proteins)
+
+enrichment.list <- lapply (cluster.list, function(cluster.proteins){
+                        setDT(as.data.table(clusterProfiler::enricher(gene = cluster.proteins, 
+                                                                      universe = dataset.all.proteins, 
+                                                                      TERM2GENE = global.go.terms,
+                                                                      pAdjustMethod = "none",
+                                                                      pvalueCutoff = 0.05)))
+                       })
+
+```
+
+We're getting no enrichment for clusters 1 and 2. Let's summarize the top 10 enrichments for clusters 3 and 4
+```{r}
+#source(paste0(drb_utils,"gene_ontology_enrichment.R"))
+cluster.enrichment.table <- rbindlist(enrichment.list[-c(1,2)], idcol = "Cluster")
+perm.cluster.enrich.tab <- cluster.enrichment.table
+
+enrichHeatmapBestPerGroup(cluster.enrichment.table, NULL, groupColumn = "Cluster", topN = 10)  # compare enrichment in the top 10 terms per group
+                       
+# GO.Enrichment.Multigroup(cluster.enrichment.table = cluster.enrichment.table,
+#                          group.column = "Cluster", 
+#                          p.value.column = "p.adjust", 
+#                          p.value.threshold = 0.01,
+#                          top.n = 10)
+```
+
+
+### PKEA
+```{r}
+species <- "HUMAN"
+resultsFile <- plottableData$ADJUSTED.Model
+dataName <- "Exp01-Adj"
+outputDirectory <- "phosphokinase_enrichment_data"
+saveKinaseData <- TRUE    # This will write the kinActFull.scores and kinActFull.mapped to zipped csvs
+
+# Threshold Parameters 
+z.apTresh <- 0.2    # z score adjusted pvalue threshold   (feel free to relax this from the usual 0.05 if you're finding few/no sig kinases)
+sea.apThresh <- 0.2 # ksea score adjusted pvalue threshold    (feel free to relax this from the usual 0.05 if you're finding few/no sig kinases)
+nThresh <- 3        # number of substrates required for kinase to be significant
+computeKinase <- TRUE # Set to FALSE if you have already run this rmd and are testing different thresholds to skip kinase data generation
+
+# Plotting Inputs
+labels2plot <- c("*") # Regex for contrasts to include in each bar plot. "-" will plot all contrasts, add strings like "-ctl" to make a plot of only vs control contrasts, or "virus1-" to plot all contrasts that have "virus1-" as the positive group (say you have multiple timepoints, try something like "virus1[.]{1,2}h-",replace "virus1" with your condition and leave "[.]{1,2}h-", it allows any 1 or 2 characters between your condition and the "h-" in a contrast to accomodate single or double digit timepoint labels)
+savePlots <- TRUE
+
+
+```
+
+```{r}
+if (computeKinase == TRUE){
+  
+  if (!dir.exists(outputDirectory)) {
+    dir.create(outputDirectory)
+  }
+  
+  
+  
+  # Load kinase data from preconfigured human or mouse data
+  if (!is.null(species)) {
+    
+    if (species == "HUMAN") {
+      kinaseMap <- fread("C:/Users/dainb/OneDrive/Documents/GitHub/proteomics_templates/phosphokinase_enrichment/HumanKinaseDataOmniPath.csv")
+    }
+    
+  } else {
+    
+    # Load custom kinase map
+    if (file.exists(kinaseMap)) {
+      kinaseMap <- fread(kinaseMap)
+    } else {
+      stop(paste("Warning: cannot open file \'", kinaseMap, "\': No such file or directoryError in file(filename, \"r\", encoding = encoding) : cannot open the connection"))
+    }
+  }
+  
+  # Load and prepare ph results
+  results <- resultsFile
+  if (!"Site" %in% colnames(results) ){
+    results <- setnames(results, "Protein", "Site")
+    results[, Protein := tstrsplit(Site, "_")[[1]]]
+    # add common gene names as geneSite and gene 
+    source (paste0(utils,"UniprotIDMapping.R"))
+    results[, geneSite := multiUniprotSites2multiGeneSites(results$Site, species = species)] [, gene := multiUniprots2multiGenes(results$Protein, species = species)]
+  }
+  
+  # Convert to single site data
+  siteData <- prepare_AMSS_ResultsFile(results,"geneSite")
+  labels <- unique(siteData$Label)
+  
+  # Compute Kinase activity z scores and sea scores
+  # Ben's code is much nicer
+  kinActList <- lapply (labels, FUN=function(lab){kinaseActivity(siteData[Label == lab & representative==TRUE], plots = FALSE,do.sea = TRUE, kinaseData = kinaseMap)})
+  names(kinActList) <- labels
+  kinActFull.scores <- rbindlist(lapply(kinActList, FUN = function(x)x$scores), idcol="Label")
+  kinActFull.mapped <- rbindlist(lapply(kinActList, FUN = function(x)x$kinaseMapped))
+
+  if (saveKinaseData == TRUE){
+    fwrite(kinActFull.mapped, file.path(outputDirectory, paste(dataName,"kinaseActivityMapped.csv.gz", sep = "_")))
+    fwrite(kinActFull.scores, file.path(outputDirectory, paste(dataName,"kinaseActivityScores.csv.gz", sep = "_")))
+  }
+}
+
+# Check how comparable z scores are across conditions
+kinActFull.scores[,bgMean, by = Label] |> unique() |> print()
+kinActFull.scores$bgMean |> range() |> print()
+                  
+mean(kinActFull.scores$meanLog2FC) |> print()
+
+```
+
+### PKEA Bar Plot
+```{r}
+
+sigKinasesZ <-  kinActFull.scores[fdr.BH < z.apTresh & N >= nThresh, unique(CTRL_GENE_NAME)]
+sigKinases.sea <-  kinActFull.scores[padj.sea < sea.apThresh & N > nThresh, unique(CTRL_GENE_NAME)]
+bplotdim <- c(10,8)
+
+
+plotKinases <- function(reg, 
+                        seaBool = FALSE, 
+                        dirAnot = "zScore", 
+                        name = NULL, 
+                        scores = kinActFull.scores, 
+                        mapped = kinActFull.mapped, 
+                        max_fdr = 0.2, 
+                        sigKinases = NULL, 
+                        save = F) {
+  
+  barPlot <- Kinase.Activities.Barplot(kinActFull.scores[grepl(reg,kinActFull.scores$Label)], 
+                                     kinActFull.mapped[grepl(reg,kinActFull.mapped$Label)], 
+                                     max_pValue = 0.05, 
+                                     max_fdr = max_fdr, 
+                                     useSEA = seaBool, 
+                                     sigKinases=sigKinases)
+  
+  if (sum(grepl("\\*|\\\\", reg)) > 0){
+    reg <- "__"
+  }
+  pre <- paste(name, reg,"_kinaseActivity_barPlot")
+  dir <- paste(name, dirAnot,"Bar_Plots",sep = "_")
+  title <- paste(name, dirAnot, pre, sep = " ")
+  #barPlot <- barPlot + ggtitle("title")
+  if (save == T & !is.atomic(barPlot)){
+    BackupAsPDF(barPlot,prefix=pre, subDir=dir, dim = bplotdim)
+  }
+  return(barPlot)
+  }
+
+lapply(labels2plot, FUN = plotKinases,
+       sigKinases = sigKinasesZ,
+       max_fdr = z.apTresh, 
+       save = savePlots)
+lapply(labels2plot, FUN = plotKinases, 
+       sigKinases = sigKinases.sea,
+       max_fdr = sea.apThresh, 
+       seaBool = TRUE, 
+       dirAnot = "ksea", 
+       save = savePlots)
+
+
+```
+
+```{r, Heatmaps Basic}
+
+sigKinase.mat.z <- as.matrix(dcast (kinActFull.scores[CTRL_GENE_NAME %in% sigKinasesZ], CTRL_GENE_NAME~Label, value.var = "Z"),
+                              rownames = "CTRL_GENE_NAME")
+sigKinase.mat.Nz <- as.matrix(dcast (kinActFull.scores[CTRL_GENE_NAME %in% sigKinasesZ], CTRL_GENE_NAME~Label, value.var = "N"),
+                                  rownames = "CTRL_GENE_NAME")
+kinHM <- Heatmap (sigKinase.mat.z, 
+         cluster_columns=FALSE, 
+         name = "Kinase Z Score",
+         column_split = colnames(sigKinase.mat.z),
+         column_title = paste0( dataName, " Kinase activity Z Score (sig substrate n dependant)"),
+         #col = circlize::colorRamp2(breaks = c(-3, -2, 2, 3), colors = c("blue", "gray", "gray", "red")),  # two midpoints in case you want to have a wider gray bar around 0
+         col = circlize::colorRamp2(breaks = c(-3, 0, 3), colors = c("blue", "white", "red")),
+         cell_fun = function(j, i, x, y, width, height, fill) {
+                                  if (!is.na(sigKinase.mat.Nz[i,j])){
+                                    grid.text(sprintf("%.0f", sigKinase.mat.Nz[i, j]), x, y, gp = gpar(fontsize=10, col="black"))
+                                  }
+                                })
+
+###
+#### KSEA
+###
+
+sigKinase.mat.Ns <- as.matrix(dcast (kinActFull.scores[CTRL_GENE_NAME %in% sigKinases.sea], CTRL_GENE_NAME~Label, value.var = "N"),
+                                  rownames = "CTRL_GENE_NAME")
+sigKinase.mat.sea <- as.matrix(dcast (kinActFull.scores[CTRL_GENE_NAME %in% sigKinases.sea], CTRL_GENE_NAME~Label, value.var = "sigScore.sea"),
+                              rownames = "CTRL_GENE_NAME")
+sigKinase.mat.l2fc <- as.matrix(dcast (kinActFull.scores[CTRL_GENE_NAME %in% sigKinasesZ], CTRL_GENE_NAME~Label, value.var = "meanLog2FC"),
+                              rownames = "CTRL_GENE_NAME")
+seakinHM <- Heatmap (sigKinase.mat.sea, 
+                  column_title = paste0( dataName, " Kinase activity SEA Score (sig substrate L2FC dependant)"),
+         cluster_columns=FALSE, 
+         name = "Kinase sea Score",
+         column_split = colnames(sigKinase.mat.sea),
+         #col = circlize::colorRamp2(breaks = c(-3, -2, 2, 3), colors = c("blue", "gray", "gray", "red")),  # two midpoints in case you want to have a wider gray bar around 0
+         col = circlize::colorRamp2(breaks = c(-3, 0, 3), colors = c("blue", "white", "red")),
+         cell_fun = function(j, i, x, y, width, height, fill) {
+                                  if (!is.na(sigKinase.mat.Ns[i,j])){
+                                    grid.text(sprintf("%.0f", sigKinase.mat.Ns[i, j]), x, y, gp = gpar(fontsize=10, col="black"))
+                                  }
+                                })
+seakinHM
+
+
+# Heatmap Colored by Log2fc
+subkinHM <- Heatmap (sigKinase.mat.l2fc, 
+                  column_title = "Kinase activity L2FC",
+         cluster_columns=FALSE, 
+         name = "Mean Log2FC",
+         column_split = colnames(sigKinase.mat.z),
+         #col = circlize::colorRamp2(breaks = c(-2, -1, 1, 2), colors = c("blue", "gray", "gray", "red")),  # two midpoints in case you want to have a wider gray bar around 0
+         col = circlize::colorRamp2(breaks = c(-3, 0, 3), colors = c("blue", "white", "red")),
+         cell_fun = function(j, i, x, y, width, height, fill) {
+                                  if (!is.na(sigKinase.mat.Nz[i,j])){
+                                    grid.text(sprintf("%.0f", sigKinase.mat.Nz[i, j]), x, y, gp = gpar(fontsize=10, col="black"))
+                                  }
+                                })
+subkinHM
+
+
+if (savePlots == T){
+  BackupAsPDF(kinHM, prefix = paste0(dataName , "Z_kinaseHeatmap_N_"), subDir = "Heatmaps", dim = c(10,8))
+  BackupAsPDF(seakinHM, prefix = paste0( dataName, "ksea_kinaseHeatmap_"), subDir = "Heatmaps", dim = c(10,6))
+  BackupAsPDF(subkinHM, prefix = paste0( dataName,"substrateL2FC_Kinase_heatmap_byCondition_"), subDir = "Heatmaps", dim = c(10,8))
+}
+
+```
+
+```{r, Heatmaps with adjusted pvalue shown /cell}
+
+sigKinase.mat.seaAdj <- as.matrix(dcast (kinActFull.scores[CTRL_GENE_NAME %in% sigKinases.sea], CTRL_GENE_NAME~Label, value.var = "padj.sea"),
+                              rownames = "CTRL_GENE_NAME")
+sigKinase.mat.zadj <- as.matrix(dcast (kinActFull.scores[CTRL_GENE_NAME %in% sigKinasesZ], CTRL_GENE_NAME~Label, value.var = "fdr.BH"),
+                              rownames = "CTRL_GENE_NAME")
+
+
+# z score
+kinHM <- Heatmap (sigKinase.mat.z, 
+         cluster_columns=FALSE, 
+         name = "Kinase Z Score",
+         column_split = colnames(sigKinase.mat.z),
+         column_title = "Kinase activity Z Score (sig substrate n dependant; p.adj shown /cell) ",
+         #col = circlize::colorRamp2(breaks = c(-3, -2, 2, 3), colors = c("blue", "gray", "gray", "red")),  # two midpoints in case you want to have a wider gray bar around 0
+         col = circlize::colorRamp2(breaks = c(-3, 0, 3), colors = c("blue", "white", "red")),
+         cell_fun = function(j, i, x, y, width, height, fill) {
+                                  if (!is.na(sigKinase.mat.zadj[i,j])){
+                                    grid.text(as.character(round(sigKinase.mat.zadj[i,j],4)), x, y, gp = gpar(fontsize=10, col="black"))
+                                  }
+                                })
+
+
+# sea score
+seakinHM <- Heatmap (sigKinase.mat.sea, 
+                  column_title = "Kinase activity SEA Score (sig substrate L2FC dependant; p.adj shown /cell)",
+         cluster_columns=FALSE, 
+         name = "Kinase sea Score",
+         column_split = colnames(sigKinase.mat.sea),
+         #col = circlize::colorRamp2(breaks = c(-3, -2, 2, 3), colors = c("blue", "gray", "gray", "red")),  # two midpoints in case you want to have a wider gray bar around 0
+         col = circlize::colorRamp2(breaks = c(-3, 0, 3), colors = c("blue", "white", "red")),
+         cell_fun = function(j, i, x, y, width, height, fill) {
+                                  if (!is.na(sigKinase.mat.seaAdj[i,j])){
+                                    grid.text(as.character(round(sigKinase.mat.seaAdj[i,j],4)), x, y, gp = gpar(fontsize=10, col="black"))
+                                  }
+                                })
+seakinHM
+
+# l2fc
+
+subkinHM <- Heatmap (sigKinase.mat.l2fc, 
+                  column_title = "Kinase activity L2FC (Z Score-p.adj shown /cell)",
+         cluster_columns=FALSE, 
+         name = "Mean Log2FC",
+         column_split = colnames(sigKinase.mat.z),
+         #col = circlize::colorRamp2(breaks = c(-3, -1, 1, 3), colors = c("blue", "gray", "gray", "red")),  # two midpoints in case you want to have a wider gray bar around 0
+         col = circlize::colorRamp2(breaks = c(-3, 0, 3), colors = c("blue", "white", "red")),
+         cell_fun = function(j, i, x, y, width, height, fill) {
+                                  if (!is.na(sigKinase.mat.zadj[i,j])){
+                                    grid.text(as.character(round(sigKinase.mat.zadj[i,j],4)), x, y, gp = gpar(fontsize=10, col="black"))
+                                  }
+                                })
+subkinHM
+
+
+
+if (savePlots == T){
+  BackupAsPDF(subkinHM, prefix = paste0( dataName,"substrateL2FC_Kinase_heatmap_"), subDir = "padj_Heatmaps", dim = c(14,6))
+  BackupAsPDF(kinHM, prefix = paste0( dataName,"Z_Kinase_heatmap_byCondition"), subDir = "padj_Heatmaps", dim = c(14,6))
+  BackupAsPDF(seakinHM, prefix = paste0( dataName,"ksea_Kinase_heatmap_"), subDir = "padj_Heatmaps", dim = c(14,6))
+}
+
+```
