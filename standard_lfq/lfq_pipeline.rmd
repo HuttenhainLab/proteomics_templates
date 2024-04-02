@@ -282,8 +282,8 @@ ggplot(unique_counts, aes(x = BioReplicate, y = Unique_Peptide_Count)) +
   labs(title = "Unique Transitions / Peptide Sequences per Replicate",
        x = "Replicate",
        y = "Number of Unique Transitions / Peptide Sequences") +
-  rotate.x.axis.text +
-  theme_bw()
+  theme_bw() +
+  rotate.x.axis.text
 
 ggsave(paste(paste(data.name, "figures", sep = "_"), "UniqueFeaturesPerReplicate.pdf", sep = "/"))
 ```
@@ -352,6 +352,7 @@ ggsave(paste(paste(data.name, "figures", sep = "_"), "ProteinIntensitiesPerSampl
 ```{r}
 unique_counts <- global.proteinSummarization$ProteinLevelData %>%
   filter(!is.na(LogIntensities)) %>%
+  filter(!is.infinite(LogIntensities)) %>%
   group_by(GROUP) %>%
   summarize(Unique_Protein_Count = n_distinct(Protein))
 
@@ -435,11 +436,8 @@ Use Ben Polacco's *makeContrast* function to help build the group comparison mat
 
 ```{r}
 
-source (paste0(utils,"MSstats_V4_Functions.R"))
-
 # makes an MsStats-compatible contrast matrix using the condition comparisons in the parameter block
-contrast.matrix <- makeContrast.regEx ( regEx = global.regexContrasts,
-                                    mssQ = global.proteinSummarization)
+contrast.matrix <- Make.LFQ.Contrast.Matrix (input.data.frame = global.proteinSummarization, condition.vector = global.regexContrasts)
 # Model-based comparison
 # Do pairwise comparison via MSstats using the provide contrast matrix, then select the comparison results
 
@@ -452,7 +450,7 @@ Save.Csv.With.Timestamp(global.pairwiseComparison, "GroupComparisonsData.csv", p
 
 # Volcano Plots
 
-Do all the volcano plots for Angelina.
+Do all the volcano plots for all experiment contrasts
 
 ```{r}
 
