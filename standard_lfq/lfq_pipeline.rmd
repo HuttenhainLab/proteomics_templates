@@ -505,3 +505,42 @@ lapply(global.regexContrasts, function(comparison) {
 })
 
 ```
+
+### Heatmaps
+```{r}
+
+# filter for significant changers
+# make heat map
+# Go enrichment on clusters
+pval.cutoff <- 0.05
+FC.cutoff <- 1
+
+# filter all proteins in group comparisons to having at least 1 significant changer in for each of our groups
+Filtered.Proteins <- as.data.table(
+  global.pairwiseComparison %>% 
+    group_by(ProteinName) %>% 
+    filter(any(adj.pvalue <= pval.cutoff & abs(log2FC) >= FC.cutoff))
+)
+
+Sig.Changing.Protein.Matrix <- as.matrix(dcast(Filtered.Proteins, Protein ~ Label, value.var = "log2FC"), rownames = "Protein")
+Sig.Changing.Protein.Matrix[is.infinite(Sig.Changing.Protein.Matrix)] <- 0
+Sig.Changing.Protein.Matrix[is.na(Sig.Changing.Protein.Matrix)] <- 0
+
+# UNCOMMENT TO SAVE HEATMAP
+#pdf("HeatMap_ADJUSTED.pdf")
+
+# Now create the heatmap
+
+heatmap <- Heatmap(
+  Sig.Changing.Protein.Matrix,
+  row_title = sprintf("%d phosphosites with\nadj.pval < 0.05 & |Log2FC| > 1", nrow(Sig.Changing.Protein.Matrix)),
+  name = "Log2FC of Labeled Timepoints\n",
+  show_row_names = FALSE,
+  cluster_columns = TRUE,
+  #km = 4
+)
+
+drawnHeatmap <- draw(heatmap)
+
+#dev.off()
+```
