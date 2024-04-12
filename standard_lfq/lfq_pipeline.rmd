@@ -268,6 +268,17 @@ This should be monomodal after the *SpectronauttoMSstatsFormat* filtering step
 hist(log2(global.prepared$Intensity), breaks = 100)
 ```
 
+```{r}
+mean_intensity <- mean(global.prepared$Intensity, na.rm = TRUE)
+
+# Plot histogram with vertical line marking the mean
+ggplot(global.prepared, aes(x = log2(Intensity))) +
+  geom_histogram(binwidth=0.1, color="black", fill="white") +
+  geom_vline(xintercept = log2(mean_intensity), color="blue", linetype="dashed", size=1)
+  
+
+```
+
 ### Count unique peptides per experimental condition
 ```{r}
 unique_counts <- as.data.table(global.prepared) %>%
