@@ -5,15 +5,39 @@ date: "2024-01-30"
 output: html_document
 ---
 
-## R Markdown
+# README
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+It is always good practice to start off any programming project with a quick *README* document or section. README documentation is a great way provide information to developers, users, or contributors of code that you wrote. Project overviews, purpose, setup instructions, and usage cases are great things to included in your README documents.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document.
+### Pipeline Overview
+
+This R Markdown document was assembled to provide a one-size-fits-most solution for Huttenhain lab members to work up their mass spectrometry-based abundance proteomics data, specifically the data from APEX-enrichment experiments. The data that comes directly out from proteomics search engines like [Spectronaut](https://biognosys.com/software/spectronaut/) or [MaxQuant](https://www.maxquant.org/) are reported at the peptide or fragment ion level. These data need to be reassembled back to the protein level and require cleaning / curating before biological interpretation is conducted. We do this with a mix of custom code and a robust statistical framework named [MSstats](https://msstats.org/).
+
+### Setup
+
+Most of this pipeline can be used without major modification after the necessary packages have been installed. The installation of necessary packages is included in commented-out lines of code several sections below.
+
+### Usage
+
+This pipeline supports proteomics data searched using Spectronaut or MaxQuant. Use this pipeline only for abundance-based proteomics experiments. If you have PTM data, you will be better off using the PTM pipeline. You will need to following files in order to use this pipeline:
+
+**Spectronaut Search**
+
+-   Spectronaut Report (HuttenhainDIA_MsStats_FragmentIon)
+
+-   This file is in .tsv format by default
+
+**MaxQuant Search**
+
+-   Maxquant Evidence File (.txt)
+
+-   Maxquant Protein Groups File  (.txt)
+
+-   Maxquant Annotations File (manually built)
 
 # Installing / Loading Required R Libraries
 
-When I'm working on a script from the ground up, the first thing I like to do is install (if not already installed) & load all the libraries that I'm planning on using before I even start thinking about loading and manipulating any data.
+When I'm working on a script from the ground up, the first thing I like to do is install (if not already installed) & load all the libraries that I'm planning on using before I even start thinking about loading and manipulating any data. R libraries only need to be installed once via the *install.packages("Function")*
 
 ### Installing CRAN Packages
 
@@ -27,10 +51,19 @@ CRAN packages can be installed several different ways. The first way is demonstr
 # Don't need run this every time. 
 # Only if you need to install a package.
 # Just replace the Package in the parentheses with whatever you need installed
-# install.packages(R.utils) # Commented out for convenience
+# If you get complaints about Rtools is required to build R packages, you can install it from the following URL: https://cran.r-project.org/bin/windows/Rtools/rtools42/rtools.html
+# You don't really need to install it, but warnings are annoying
+
+# install.packages("devtools")
+# install.packages("data.table")
+# install.packages("dplyr")
+# install.packages("magrittr")
+# install.packages("R.utils")
+# install.packages("ggplot2")
+# install.packages("ggrepel")
 ```
 
-### Installing BioConductR Packages
+### Installing Bioconductor Packages
 
 BioConductor has its own package manager. Before you can install anything from it, you first need to install the BioConductor manager from CRAN.
 
@@ -42,7 +75,7 @@ Then you can install all the BioConductor packages you want! Note, you may be pr
 
 ```{r}
 # Install a specific version of BioConductor core packages
-# BiocManager::install(version = "3.18)
+# Don't use this unless you know what you're doing...<BiocManager::install(version = "3.18)>
 
 # Install latest version of BioConductor core packages
 # BiocManager::install()
@@ -53,7 +86,7 @@ Some BioConductor packages don't install with the core distribution. Do install 
 
 ```{r}
 # Install a set of specific non-core package. Format: c("Package1", "Package2", etc....)
-# BiocManager::install(c("MSstats"))
+# BiocManager::install(c("MSstats", "ComplexHeatmap"))
 ```
 
 ### Load Packages
@@ -63,23 +96,18 @@ Now that in theory everything is installed. Let's load our packages. If you get 
 ```{r}
 # Load Packages
 library(devtools)
-library(dplyr)
 library (data.table)
+library(dplyr)
 library (magrittr)
-library (pbapply)
 library(R.utils) # Actually a cran package
 
 # Plotting packages
-library(plotly)
 library (ggplot2)
-library (circlize)
 library(ggrepel)
-library(svglite)
 rotate.x.axis.text <- theme(axis.text.x = element_text(angle = 90,vjust = 0.5, hjust=1))
 
 # MSstats Packages
 library(MSstats)
-library(MSstatsPTM)
 
 # EnrichR Complex Heatmap Package
 library (ComplexHeatmap)
@@ -95,7 +123,6 @@ drb_utils <- "https://raw.githubusercontent.com/HuttenhainLab/drb_utils/main/"
 source(paste0(drb_utils,"data_management.R"))
 source(paste0(drb_utils,"spectronaut_data_cleaning.R"))
 source(paste0(drb_utils,"gene_ontology_enrichment.R"))
-source(paste0(drb_utils,"phosphokinase_enrichment_analysis.R"))
 
 ```
 
@@ -110,7 +137,7 @@ Enter in values specific to your dataset in this block and run all blocks of cod
 export.type <- "SP" 
 
 # Appended to all exported data/figures
-data.name <- "DRB_LFQ"
+data.name <- "Example_LFQ"
 
 # create subdirectories to store intermediate tables and figures
 Create.Pipeline.Directories(data.name)
@@ -139,21 +166,29 @@ if (export.type == "SP") {
   ## This list should be strings that match your exact condition names that you entered in Spectronaut. 
   ## You can also use RegEex terms if you know what you're doing, but I find it more exact to use full condition names to avoid accidental     RegEx matches
 
-global.regexContrasts <- c("ctrl_40-0min_40", "ctrl_40-5min_40", "0min_40-5min_40",
-                    "ctrl_50-0min_50", "ctrl_50-5min_50", "0min_50-5min_50",
-                    "ctrl_60-0min_60", "ctrl_60-5min_60", "0min_60-5min_60",
-                    "ctrl_70-0min_70", "ctrl_70-5min_70", "0min_70-5min_70",
-                    "ctrl_80-0min_80", "ctrl_80-5min_80", "0min_80-5min_80")
+global.regexContrasts <- c(
+  # 0 minute APEX vs no biotinylation control
+  "0m_40-ctrl_40", "0m_50-ctrl_50", "0m_60-ctrl_60", "0m_70-ctrl_70", "0m_80-ctrl_80",
+  
+  # 5 minute APEX vs no biotinylation control
+  "5m_40-ctrl_40", "5m_50-ctrl_50", "5m_60-ctrl_60", "5m_70-ctrl_70", "5m_80-ctrl_80",
+  
+  # 5 minute APEX vs 0 minute APEX                          
+  "5m_40-0m_40", "5m_50-0m_50", "5m_60-0m_60", "5m_70-0m_70", "5m_80-0m_80"
+)
 
 
 # Sometimes you want to remove certain runs because they're bad, or before data normalization. 
 # You can also do this at the condition level for ease, but you'll need to modify the code in the post-normalization section to do this
 # Specify the runs here. 
-runs.to.remove <- c("TT000243_AM04-01","TT000244_AM04-02","TT000245_AM04-03","TT000246_AM04-04","TT000247_AM04-05","TT000254_AM04-12","TT000255_AM04-13","TT000256_AM04-14","TT000257_AM04-15","TT000258_AM04-16")
+runs.to.remove <- c()
+# Uncomment the below line to remove the "control" samples before median normalization
+# runs.to.remove <- c("TT000243_AM04-01","TT000244_AM04-02","TT000245_AM04-03","TT000246_AM04-04","TT000247_AM04-05","TT000254_AM04-12","TT000255_AM04-13","TT000256_AM04-14","TT000257_AM04-15","TT000258_AM04-16")
 ```
 
 # Import Data
 
+This reads the proteomics search engine data verbatim and loads it into a data frame. You can see this data frame in the environment window. (default location: upper left)
 ```{r}
 
 # Spectronaut specific data files
@@ -186,6 +221,7 @@ if (export.type == "SP") {
   rm(rows_to_remove, substring_to_remove)
 }
 ```
+
 
 ### Make protein metadata linker table
 
@@ -256,6 +292,15 @@ if (export.type == "SP") {
 
 ```
 
+### Remove any unwanted runs
+
+This tosses any files listed in the *runs.to.remove* vector. I use this block of code to toss all my control samples before median normalization. 
+```{r}
+# Tosses any rows where the 'Run' column matches a value in the 'runs.to.remove' vector listed at the top
+global.prepared <- global.prepared[!(global.prepared$Run %in% runs.to.remove), ]
+
+```
+
 # Quality Control Plots of the Raw Data
 
 Now is a good time to take a look at the raw data.
@@ -268,6 +313,8 @@ This should be monomodal after the *SpectronauttoMSstatsFormat* filtering step
 hist(log2(global.prepared$Intensity), breaks = 100)
 ```
 
+The code block below is just for demonstration purposes. Marking specific thresholds can be useful for quality control or visualization purposes.
+
 ```{r}
 mean_intensity <- mean(global.prepared$Intensity, na.rm = TRUE)
 
@@ -279,7 +326,10 @@ ggplot(global.prepared, aes(x = log2(Intensity))) +
 
 ```
 
-### Count unique peptides per experimental condition
+### Count unique peptide sequences per experimental condition
+
+For a general abundance proteomics APEX experiment, we would hope for 70,000+ peptide sequences per replicate. This particular dataset is lower than that due to various reasons, but what we are looking for are consistent numbers across related replicates and the APEX samples. APEX control samples (no construct or no biotin so no enrichment) hopefully will be lower.
+
 ```{r}
 unique_counts <- as.data.table(global.prepared) %>%
   filter(!is.na(Intensity)) %>%
@@ -289,10 +339,10 @@ unique_counts <- as.data.table(global.prepared) %>%
 
 ggplot(unique_counts, aes(x = BioReplicate, y = Unique_Peptide_Count)) +
   geom_bar(stat = "identity", fill = "skyblue", width = 0.5) +
-  geom_text(aes(label = Unique_Peptide_Count), vjust = 1, color = "black", size = 3) +
-  labs(title = "Unique Transitions / Peptide Sequences per Replicate",
+  geom_text(aes(label = Unique_Peptide_Count), vjust = -0.5, color = "black", size = 3) +
+  labs(title = "Unique Peptide Sequences per Replicate",
        x = "Replicate",
-       y = "Number of Unique Transitions / Peptide Sequences") +
+       y = "Number of Peptide Sequences per Replicate") +
   theme_bw() +
   rotate.x.axis.text
 
@@ -300,6 +350,9 @@ ggsave(paste(paste(data.name, "figures", sep = "_"), "UniqueFeaturesPerReplicate
 ```
 
 ### Get boxplot of quantitative values per sample
+
+Just the same as the number of peptide sequences, we also expect related samples to have similar quantitative distributions. The APEX experimental workflow involved biotin labeling of proximal proteins and subsequent enrichment. As the control samples were not designed to undergo biotin labeling, the control samples ideally will have *lower* intensity distributions than the APEX samples.
+
 ```{r}
 ggplot (data = global.prepared, aes (x = paste0(BioReplicate),
                           y = log10(Intensity), 
@@ -316,7 +369,7 @@ This is where we summarize peptides (or peptide transitions depending on your da
 
 ```{r}
 global.proteinSummarization = MSstats::dataProcess(global.prepared,
-                               normalization = 'FALSE',				
+                               normalization = 'FALSE',	# "equalizeMedians"			
                                logTrans = 2,				
                                featureSubset = 'highQuality',				
                                summaryMethod="TMP",
@@ -329,7 +382,9 @@ Save.Csv.With.Timestamp(global.proteinSummarization$ProteinLevelData, "ProteinLe
 ```
 
 # (Optional) Reload DataProcess results
-If you ever want to go back & reanalyze data after the data process function, it can be frustrating to have to run through the entire pipeline again up to this point. 
+
+If you ever want to go back & reanalyze data after the data process function, it can be frustrating to have to run through the entire pipeline again up to this point.
+
 ```{r}
 # global.proteinSummarization <- list(ProteinLevelData = NULL, FeatureLevelData = NULL)
 
@@ -403,19 +458,18 @@ This is a quality control plot I borrowed from Ben Polacco.If you've normalized 
 
 *APEX works by labeling neighboring/interacting proteins with biotin which is then used to purify labeled proteins. There are also proteins that are endogenously biotinylated which will co-purify with the APEX-labeled proteins. Here we look at a subset of these endogenous biotin proteins, and we inspect their post-normalization background levels, which are inversely related to the labeling-efficiency of APEX. More background after normalization implies there is less APEX-labeled signal.*
 
-If you see your control conditions at higher abundance compared to the rest of your samples, great, APEX worked!
+If you see your control conditions at higher abundance compared to the rest of your samples, great, APEX labeling and enrichment is behaving as we expected!
 
 ```{r}
 
 biotin.carboxylases.up <- c("O00763","P05165","P11498","Q13085","Q96RQ3")
 
-test <- as.data.table(global.proteinSummarization$ProteinLevelData)
-test <- test[grepl(paste(biotin.carboxylases.up, collapse = "|"), test$Protein), ]
-#test <- test[test$Protein %in% biotin.carboxylases.up, ]
-#ggplot(test[Protein %in% biotin.carboxylases.up], aes (x = interaction ( SUBJECT, GROUP ), y = LogIntensities, color = Protein)) + geom_line(aes(group = Protein)) + geom_point(aes(shape = as.factor(SUBJECT))) +  rotate.x.axis.text
+native.biotin.data <- as.data.table(global.proteinSummarization$ProteinLevelData)
+native.biotin.data <- native.biotin.data[grepl(paste(biotin.carboxylases.up, collapse = "|"), native.biotin.data$Protein), ]
+
 
 # Plotting code
-ggplot(test, aes(x = Protein, y = LogIntensities, fill = GROUP)) +
+ggplot(native.biotin.data, aes(x = Protein, y = LogIntensities, fill = GROUP)) +
   stat_summary(
     fun.data = mean_sdl,
     fun.args = list(mult = 1),
@@ -443,7 +497,7 @@ rm(biotin.carboxylases.up, test)
 
 Another way you can check for successful APEX enrichment is to make volcano plots comparing protein abundances between non-BP vs BP conditions. What you should see is a mass up-regulation of most proteins. If you don't see that, your enrichment likely didn't work, or you have a ton of background binding. To make these comparisons, we can use the GroupComparison function from msStats. To use this function, you need the output from MSstats::DataProcess, and you also have to build a contrast matrix, essentially a numerical vector indicating what experimental conditions you want to compare.
 
-Use Ben Polacco's *makeContrast* function to help build the group comparison matrix without errors. Again, you can do this yourself if you're careful without using this function.
+I adapted Ben Polacco's old *makeContrast* function to help build the group comparison matrix without errors. Again, you can do this yourself if you're careful without using this function.
 
 ```{r}
 
@@ -484,7 +538,7 @@ lapply(global.regexContrasts, function(comparison) {
          Significance := ifelse (log2FC > 0, "Up", "Down")]
   
   ## Render volcano plots. Highlight arrestin and adrenoceptor beta 2
-  ggplot(thisPairwiseComparison, aes(x = log2FC, y = -log10(pvalue), color = Significance, label = ProteinName)) +
+  plot <- ggplot(thisPairwiseComparison, aes(x = log2FC, y = -log10(pvalue), color = Significance, label = ProteinName)) +
     
     # significance labels and lines
     # vertical lines
@@ -512,12 +566,15 @@ lapply(global.regexContrasts, function(comparison) {
                     aes(x = log2FC, y = -log10(pvalue)), label = "EEA1_HUMAN", color = "green", size = 3, box.padding = 0.5) +
     theme_bw()
   
-  ggsave(paste("./VolcanoPlot", paste(comparison, ".pdf", sep = ""), sep = "_"))
+  print(plot)
+  
+  ggsave(paste("./VolcanoPlot", paste(comparison, ".pdf", sep = ""), sep = "_"), plot)
 })
 
 ```
 
 ### Heatmaps
+
 ```{r}
 
 # filter for significant changers
@@ -544,7 +601,7 @@ Sig.Changing.Protein.Matrix[is.na(Sig.Changing.Protein.Matrix)] <- 0
 
 heatmap <- Heatmap(
   Sig.Changing.Protein.Matrix,
-  row_title = sprintf("%d phosphosites with\nadj.pval < 0.05 & |Log2FC| > 1", nrow(Sig.Changing.Protein.Matrix)),
+  row_title = sprintf("%d proteins with\nadj.pval < 0.05 & |Log2FC| > 1", nrow(Sig.Changing.Protein.Matrix)),
   name = "Log2FC of Labeled Timepoints\n",
   show_row_names = FALSE,
   cluster_columns = TRUE,
