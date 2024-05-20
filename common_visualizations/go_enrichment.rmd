@@ -1,0 +1,63 @@
+This is taken directly from the phosphoproteomics pipeline template .RMD. It will not work by itself. 
+
+### Go Enrichment
+GO enrichment checks if a subset of your data is enriched for a particular GO term vs your dataset as a whole. This idea isn't exclusive to GO terms, but it relies on expert annotation of everything in your dataset. We mostly trust GO annotations, but again, it's not perfect.
+
+This current analysis is done at the PTM level, not adjusted...
+```{r}
+# only want to load these terms once. It takes a bit to run
+if (!exists("global.go.terms")) {
+  global.go.terms <- Load.GO.Terms.From.Bioconductor()
+}
+
+# This is all the proteins in your dataset.
+dataset.all.proteins <- unique(plottableData$PTM.Model$Protein.No.Site)
+
+# This is the subset of genes that you want to check for term enrichment
+row.dendrogram <- row_dend(drawnHeatmap)
+
+# get indices of clusters of interest based on dendrogram
+cluster1.row.indices <- Dendrogram.Cluster.Get.Original.Indices(row.dendrogram[[2]][[1]][[1]])
+cluster2.row.indices <- Dendrogram.Cluster.Get.Original.Indices(row.dendrogram[[2]][[1]][[1]])
+cluster3.row.indices <- Dendrogram.Cluster.Get.Original.Indices(row.dendrogram[[2]][[2]][[1]])
+cluster4.row.indices <- Dendrogram.Cluster.Get.Original.Indices(row.dendrogram[[2]][[2]][[2]])
+
+# Get sitified proteins from cluster indices, then unsitify and unique them.
+cluster1.proteins <- rownames(Sig.Changing.Site.Matrix)[cluster1.row.indices]
+cluster1.proteins  <- unique(sapply(strsplit(as.character(cluster1.proteins ), "_"), function(x) x[1]))
+
+cluster2.proteins <- rownames(Sig.Changing.Site.Matrix)[cluster2.row.indices]
+cluster2.proteins  <- unique(sapply(strsplit(as.character(cluster2.proteins ), "_"), function(x) x[1]))
+
+cluster3.proteins <- rownames(Sig.Changing.Site.Matrix)[cluster3.row.indices]
+cluster3.proteins  <- unique(sapply(strsplit(as.character(cluster3.proteins ), "_"), function(x) x[1]))
+
+cluster4.proteins <- rownames(Sig.Changing.Site.Matrix)[cluster4.row.indices]
+cluster4.proteins  <- unique(sapply(strsplit(as.character(cluster4.proteins ), "_"), function(x) x[1]))
+
+cluster.list <- list(Cluster_1 = cluster1.proteins, Cluster_2 = cluster2.proteins, Cluster_3 = cluster3.proteins, Cluster_4 = cluster4.proteins)
+
+enrichment.list <- lapply (cluster.list, function(cluster.proteins){
+                        setDT(as.data.table(clusterProfiler::enricher(gene = cluster.proteins, 
+                                                                      universe = dataset.all.proteins, 
+                                                                      TERM2GENE = global.go.terms,
+                                                                      pAdjustMethod = "none",
+                                                                      pvalueCutoff = 0.05)))
+                       })
+
+```
+
+We're getting no enrichment for clusters 1 and 2. Let's summarize the top 10 enrichments for clusters 3 and 4
+```{r}
+#source(paste0(drb_utils,"gene_ontology_enrichment.R"))
+cluster.enrichment.table <- rbindlist(enrichment.list[-c(1,2)], idcol = "Cluster")
+perm.cluster.enrich.tab <- cluster.enrichment.table
+
+enrichHeatmapBestPerGroup(cluster.enrichment.table, NULL, groupColumn = "Cluster", topN = 10)  # compare enrichment in the top 10 terms per group
+                       
+# GO.Enrichment.Multigroup(cluster.enrichment.table = cluster.enrichment.table,
+#                          group.column = "Cluster", 
+#                          p.value.column = "p.adjust", 
+#                          p.value.threshold = 0.01,
+#                          top.n = 10)
+```
