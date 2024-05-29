@@ -66,12 +66,19 @@ filter.ptm.score <- 0.75   # default 0.75, Class 1 Phosphopeptides.
 if (export.type == "SP") {
   # Spectronaut specific parameters
   # PUT THE PHOSPHO SPECTRONAUT EXPORT BELOW
-  spectronaut.phospho.report <- "../../data/MG05_3ul_MsStatsPTM.tsv"
-  spectronaut.phospho.annotations <- "../../data/annotations_global.csv"
+  spectronaut.phospho.report <- "../example_data/MSstatsPTM/example_spectronaut_phospho.tsv"
+  
+  # A self-built CSV which links file names to sample replicate and condition names
+  spectronaut.phospho.annotations <- "../example_data/MSstatsPTM/sample_annotations.csv"
+  
+  # The protein database that you searched against your mass spec data.
+  protein.database <- "../example_data/MSstatsPTM/Human_Canonical.fasta"
   
   # If you have abundance proteomics, specify it here. Otherwise leave it as an empty string "".
   # PUT THE ABUNDANCE SPECTRONAUT EXPORT BELOW
-  spectronaut.globalproteome.report <- "../../data/MG05A_StandardTolerances_Report.tsv"
+  spectronaut.globalproteome.report <- "../example_data/MSstatsPTM/MG05A_StandardTolerances_Report.tsv"
+  
+  
 } else if (export.type == "MQ") {
   maxquant.evidence <- "../example_data/example_data_MQ_evidence.txt"
   maxquant.proteingroups <- "../example_data/example_data_MQ_proteinGroups.txt"
