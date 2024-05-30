@@ -2,5 +2,16 @@
 .DS_store
 
 # Ignore anything in the example data folder for now
-example_data
+# example_data
 
+example_data/MSstatsPTM/sample_annotations.csv
+example_data/MSstatsPTM/Human_Isoforms.fasta
+example_data/MSstatsPTM/Human_Canonical.fasta
+example_data/MSstatsPTM/example_spectronaut_phospho.tsv
+example_data/MSstatsPTM/example_spectronaut_abundance.tsv
+example_data/example_data_spectronaut_phospho.tsv
+example_data/example_data_spectronaut.tsv
+example_data/example_data_MQ_proteinGroups.txt
+example_data/example_data_MQ_evidence.txt
+example_data/example_data_MQ_annotations.csv
+example_data/example_data_dataProcess_output_protein.csv
