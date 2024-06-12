@@ -28,7 +28,7 @@ library(ggrepel)
 library(plotly)
 
 # Krogan Lab Utility Functions
-utils <- "C:/Users/dainb/OneDrive/Documents/GitHub/bp_utils/"
+utils <- "https://raw.githubusercontent.com/HuttenhainLab/bp_utils/master/"
 source(paste0(utils,"ManageScriptData.R"))
 source(paste0(utils, "enrichmentTestFunctions.R"))
 source (paste0(utils,"MSstats_V4_Functions.R"))
@@ -37,7 +37,7 @@ WriteSessionInfo()
 WriteInstalledPackages()
 
 # Dain Utility Functions
-drb_utils <- "C:/Users/dainb/OneDrive/Documents/GitHub/drb_utils/"
+drb_utils <- "https://raw.githubusercontent.com/HuttenhainLab/drb_utils/main/"
 source(paste0(drb_utils,"data_management.R"))
 source(paste0(drb_utils,"spectronaut_data_cleaning.R"))
 source(paste0(drb_utils,"gene_ontology_enrichment.R"))
