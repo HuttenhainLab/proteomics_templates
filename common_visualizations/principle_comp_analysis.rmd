@@ -27,7 +27,7 @@ PCA does not work with missing values, so either you need to impute beforehand o
 # Go from long to wide format
 # Row names are protein groups
 # Columns are each sample's LogIntensity values for each protein
-intensity.matrix <- as.matrix(dcast(as.data.table(global.proteinSummarization$ProteinLevelData), Protein ~GROUP+SUBJECT, value.var = "LogIntensities"),
+intensity.matrix <- as.matrix(dcast(as.data.table(experiment.dataProcessed$PTM$ProteinLevelData), Protein ~ SUBJECT, value.var = "LogIntensities"),
                            rownames = "Protein")
 
 
@@ -68,11 +68,11 @@ p <- ggplot (pcaDT, aes(x=PC1, y=PC2, color = batch )) +
   theme_bw() + 
   xlab (sprintf ("PC1, %.1f%%", pcaPercentVar[1])) + 
   ylab (sprintf ("PC2, %.1f%%", pcaPercentVar[2])) + 
-  ggtitle (sprintf ("PCA using %d proteins (log intensity)", nrow(complete.data.matrix))) 
+  ggtitle (sprintf ("DOPA Samples - PCA using %d Phosphosites (log intensity)", nrow(complete.data.matrix))) 
 p
 
 # Optionally save the figure
-#ggsave(paste0(output.figure.folder, "non-normalizedPCA.pdf"))
+ggsave(paste0("figures/", "Replicate_PCA.pdf"))
 ```
 
 A 3D visualization done via Plotly. This allows you to also view PC3 at the same time.

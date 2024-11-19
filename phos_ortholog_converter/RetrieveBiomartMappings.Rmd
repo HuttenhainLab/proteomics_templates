@@ -1,0 +1,91 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(biomaRt)
+
+#datasets <- listDatasets(useMart('ensembl'))
+#datasets[grep('Chinese', datasets[,2]),]
+
+#human.mart <- useMart('ensembl', dataset = 'hsapiens_gene_ensembl')
+#mouse.mart <- useMart('ensembl', dataset = 'mmusculus_gene_ensembl')
+```
+
+
+```{r}
+table <- getLDS(
+  attributes = c('ensembl_gene_id','external_gene_name', 'uniprotswissprot'),
+  filters="ensembl_gene_id",
+  values = c(),
+  mart = mouse.mart,
+  attributesL = c('uniprotswissprot'),
+  martL = human.mart,
+  uniqueRows = TRUE)
+#head(table[table$external_gene_name != '',], 30)
+```
+
+```{r}
+
+test.attributes <- listAttributes(human.mart)
+```
+
+
+```{r}
+mouse.table <- getBM(
+  #attributes = c('ensembl_gene_id','external_gene_name', 'uniprotswissprot', 'hsapiens_homolog_ensembl_gene', 'hsapiens_homolog_associated_gene_name'),
+  attributes = c('ensembl_gene_id','external_gene_name', 'uniprotswissprot'),
+  mart = mouse.mart
+)
+
+human.table <- getBM(
+  attributes = c('ensembl_gene_id','external_gene_name', 'uniprotswissprot'),
+  mart = human.mart
+)
+```
+
+```{r}
+
+library(dplyr)
+library(R.utils) # Actually a cran package
+library(dplyr)
+library (data.table)
+rotate.x.axis.text <- theme(axis.text.x = element_text(angle = 90,vjust = 0.5, hjust=1))
+library (magrittr)
+library (pbapply)
+
+mouse.table <- fread("C:/Users/dainb/OneDrive/Documents/GitHub/proteomics_templates/phos_ortholog_converter/Mouse Mart Uniprot.txt")
+setnames(mouse.table, "Gene stable ID", "Mouse Ensembl")
+setnames(mouse.table, "Gene name", "Mouse Gene")
+setnames(mouse.table, "UniProtKB/Swiss-Prot ID", "Mouse Uniprot")
+
+human.table <- fread("C:/Users/dainb/OneDrive/Documents/GitHub/proteomics_templates/phos_ortholog_converter/Human Mart Uniprot.txt")
+setnames(human.table, "Gene stable ID", "Human Ensembl")
+setnames(human.table, "Gene name", "Human Gene")
+setnames(human.table, "UniProtKB/Swiss-Prot ID", "Human Uniprot")
+
+xmap.table <- fread("C:/Users/dainb/OneDrive/Documents/GitHub/proteomics_templates/phos_ortholog_converter/Mouse Mart Human Xmap.txt")
+setnames(xmap.table, "Gene stable ID", "Mouse Ensembl")
+setnames(xmap.table, "Human gene stable ID", "Human Ensembl")
+
+xmap.table <- xmap.table %>%
+  filter(`Human Ensembl` != "")
+```
+
+```{r}
+combined.xmap <- merge(xmap.table, mouse.table, by = "Mouse Ensembl")
+combined.xmap <- merge(combined.xmap, human.table, by = "Human Ensembl", allow.cartesian=TRUE)
+
+combined.xmap <- combined.xmap %>%
+  filter(`Mouse Uniprot` != "" & `Human Uniprot` != "")
+  
+combined.xmap <- distinct(combined.xmap, `Mouse Uniprot`, `Human Uniprot`, .keep_all=TRUE)
+
+combined.xmap$`Gene name` <- NULL
+combined.xmap$`Human gene name` <- NULL
+combined.xmap$`Human protein or transcript stable ID` <- NULL
+
+fwrite(combined.xmap, "C:/Users/dainb/OneDrive/Documents/GitHub/proteomics_templates/phos_ortholog_converter/20240830_Mouse_xMap_Human.txt")
+```

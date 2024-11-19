@@ -1,0 +1,133 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Define Functions
+
+```{r}
+
+getAllPhosphoSites <- function(alignment, gaps=c("-"), siteAA = c("S", "T", "Y")){
+  #get a true position by counting cumulative gaps at each position
+  patternPos <- ( seq_len(length(alignment$patternChars)) -
+                    cumsum(alignment$patternChars %in% gaps) )
+  subjectPos <- ( seq_len(length(alignment$subjectChars)) -
+                    cumsum(alignment$subjectChars %in% gaps) )
+  
+  # this will make redundnat patternPos over the course of a gap
+  # but you can check the chars to make sure we're not reading a gap
+  if (length(patternPos) == 0 && length(subjectPos) == 0) {
+    return(NULL)
+  }
+  
+  x <- data.table(patternChars = alignment$patternChars, 
+             subjectChars=alignment$subjectChars, 
+             patternPos, 
+             subjectPos)[patternChars %in% siteAA | subjectChars %in% siteAA,
+                         .(patternPos, patternAA = patternChars, subjectPos, subjectAA = subjectChars)]
+  
+  return(x)
+}
+```
+
+```{r}
+library(Biostrings)
+library(seqinr)
+library(parallel)
+library(tidyr)
+library(data.table)
+```
+
+### create Mouse -> Human X-mapping table
+```{r}
+# # EXAMPLE USAGE
+
+# Define fasta files
+fasta_from = "C:/Users/dainb/OneDrive/Documents/GitHub/proteomics_templates/phos_ortholog_converter/Mouse_Canonical_20240822.fasta"
+fasta_to = "C:/Users/dainb/OneDrive/Documents/GitHub/proteomics_templates/phos_ortholog_converter/Human_Canonical_20240822.fasta"
+
+# Load tab_orthologs
+#table_orthologs <- fread("C:/Users/dainb/OneDrive/Documents/GitHub/proteomics_templates/phos_ortholog_converter/Table_Convert_Human-Mouse.txt")
+#table_orthologs <- table_orthologs[,.(`uniprot_mouse`,`uniprot_human`)]
+
+#table_orthologs <- fread("C:/Users/dainb/OneDrive/Documents/GitHub/proteomics_templates/phos_ortholog_converter/20240830_Mouse_xMap_Human.txt")
+#table_orthologs <- table_orthologs[,.(`Mouse Uniprot`,`Human Uniprot`)]
+
+table_orthologs <- fread("C:/Users/dainb/OneDrive/Documents/GitHub/proteomics_templates/phos_ortholog_converter/Complete Biomart Xmap.txt")
+setnames(table_orthologs, new = c("Mouse Ensembl", "Mouse Gene", "Mouse Uniprot", "Human Ensembl", "Human Gene", "Human Uniprot"))
+
+table_orthologs <- table_orthologs %>%
+ filter(`Mouse Uniprot` != "" & `Human Uniprot` != "")
+table_orthologs <- table_orthologs[,.(`Mouse Uniprot`,`Human Uniprot`)]
+
+colnames(table_orthologs) <- c("From","To")
+table_orthologs <- unique(table_orthologs[table_orthologs$From!="" & table_orthologs$To!="", ])
+
+
+D = fread("C:/Users/dainb/DataProcessing/TL01/notebooks/DOPA/processed_data/ MsStats_GroupComparison_PTM.csv")
+D$ProteinId <- gsub("_.*","",D$Protein)
+array_from = unique(D$Protein)
+
+gaps <-c("-")
+siteAA = c("S", "T", "Y")
+
+# Load fasta file
+message("LOADING FASTA FILES...")
+fas_from = Biostrings::readAAStringSet(fasta_from)  # this one gives more sequence coverage of the monkey sequences, with an additional about 28 seqs
+names(fas_from) = gsub("^(sp|tr)\\|(.*)\\|.*", "\\2", names(fas_from))
+
+fas_to = Biostrings::readAAStringSet(fasta_to)  # this one gives more sequence coverage of the monkey sequences, with an additional about 28 seqs
+names(fas_to) = gsub("^(sp|tr)\\|(.*)\\|.*", "\\2", names(fas_to))
+
+# Restrict table_ortholog to only consider proteins that you want converted now (to speed up algorithm)
+table_orthologs = table_orthologs[table_orthologs$From %in% gsub("_.*","",array_from),]
+
+# Create sequencePairList
+message("CREATING SEQUENCE PAIR LIST...")
+sequencePairList = lapply (1:nrow(table_orthologs), function(i)list(fas_from[[table_orthologs[i]$From]],
+                                                                     fas_to[[table_orthologs[i]$To]]))
+
+# for (i in 1:length(sequencePairList)){
+#   pair = sequencePairList[[i]]
+#   Biostrings::pairwiseAlignment(pattern = pair[[1]], subject = pair[[2]])
+#   print(i)
+# }
+
+# Global alignment
+message("ALIGNING SEQUENCES PAIRWISE...")
+cl = makeCluster(detectCores() - 4)
+alignmentsGlobal = parallel::parLapply (cl,sequencePairList,
+                                        fun=function(pair){
+                                          if ( !is.null(pair[[1]]) & !is.null(pair[[2]]) ){
+                                          a = Biostrings::pairwiseAlignment(pattern = pair[[1]], subject = pair[[2]])
+                                          c(score=Biostrings::score(a), 
+                                            patternChars = strsplit(toString(Biostrings::alignedPattern(a)), split=""),
+                                            subjectChars = strsplit(toString(Biostrings::alignedSubject(a)), split="")
+                                          )
+                                          }
+                                        })
+stopCluster(cl)
+names(alignmentsGlobal) <- paste(table_orthologs$From, table_orthologs$To, sep="_")
+
+
+# Make table that gets all sites of interest, annotates per position how it changes 
+message("CREATING FINAL OUTPUT TABLES...")
+allSites = lapply (alignmentsGlobal, getAllPhosphoSites, siteAA = siteAA) %>% rbindlist(idcol = "pair")
+allSites[, c("pattern", "subject") := tstrsplit(pair, split="_")]
+allSites[,pair:=NULL]
+colnames(allSites) = gsub("pattern","From",colnames(allSites))
+colnames(allSites) = gsub("subject","To",colnames(allSites))
+allSites$From_ProteinSite = paste0(allSites$From,"_",allSites$FromAA,allSites$FromPos)
+allSites$To_ProteinSite = paste0(allSites$To,"_",allSites$ToAA,allSites$ToPos)
+
+# Write out file
+fwrite(allSites, file="DOPA_MappedSites_Mouse-Human_Dain.txt",sep="\t")
+
+# Extract sites that are specific to input
+table_out = allSites[allSites$From_ProteinSite %in% array_from, .(From_ProteinSite,To_ProteinSite)]
+fwrite(table_out, file="DOPA_Mapping_Mouse-Human_Dain.txt",sep="\t")
+
+# Return
+message("ANALYSIS COMPLETE!")
+
+```

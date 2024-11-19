@@ -97,9 +97,16 @@ Now that in theory everything is installed. Let's load our packages. If you get 
 # Load Packages
 library(devtools)
 library (data.table)
-library(dplyr)
+
 library (magrittr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+
 library(R.utils) # Actually a cran package
+
+library(UniProt.ws)
+library(purrr)
 
 # Plotting packages
 library (ggplot2)
@@ -123,6 +130,54 @@ drb_utils <- "https://raw.githubusercontent.com/HuttenhainLab/drb_utils/main/"
 source(paste0(drb_utils,"data_management.R"))
 source(paste0(drb_utils,"spectronaut_data_cleaning.R"))
 source(paste0(drb_utils,"gene_ontology_enrichment.R"))
+
+# Define functions to bind gene names to a data table based on UniProt ID column
+map.gene.names <- function(protein.column, taxonomy.id = 9606) {
+  unique.phosphosites <- unique(unlist(strsplit(as.character(protein.column), ";")))
+  UniProt.IDs <- unique(sapply(unique.phosphosites, function(x) strsplit(x, "_")[[1]][1]))
+  
+  UniProt.mapping <- select(UniProt.ws(taxId = 9606), # 10090 = mouse
+                       keys = UniProt.IDs,
+                       columns = c("UniProtKB", "gene_primary"),
+                       keytype = "UniProtKB")
+  
+  # Create a named vector for fast lookup
+  gene.name.map <- setNames(UniProt.mapping$Gene.Names..primary., UniProt.mapping$From)
+  
+  # Function to replace UniProt IDs with gene names
+  map_protein <- function(entry) {
+    # Split the entry by semicolons
+    
+    phosphosites <- unlist(strsplit(entry, ";"))
+    
+    # Replace UniProt IDs with gene names
+    mapped_sites <- sapply(phosphosites, function(site) {
+      # Split the site by underscore to separate UniProt ID and the rest
+      parts <- unlist(strsplit(site, "_"))
+      UniProtID <- parts[1]
+      
+      # Check if the UniProt ID has a mapped gene name
+      gene_name <- gene.name.map[UniProtID]
+      
+      # If a gene name is found, use it; otherwise, keep the UniProt ID
+      if (!is.na(gene_name)) {
+        # Recombine the gene name with the remaining part
+        paste(c(gene_name, parts[-1]), collapse = "_")
+      } else {
+        # If no mapping exists, return the original site
+        site
+      }
+    })
+    
+    # Rejoin the mapped sites with semicolons
+    paste(mapped_sites, collapse = ";")
+  }
+  
+  # Apply the mapping function to each row of the protein column
+  mapped_column <- sapply(as.character(protein.column), map_protein)
+  
+  return(mapped_column)
+}
 
 ```
 
@@ -210,44 +265,9 @@ It's recommended to include commonly observed contaminant proteins when processi
 ```{r}
 if (export.type == "SP") {
   # remove all contaminant proteins.
-  substring_to_remove <- "Cont_"
-  
-  # Identify rows containing the contaminant substring
-  rows_to_remove <- grep(substring_to_remove, spectronaut.lfq.report$PG.ProteinAccessions)
-  
-  # Remove rows using the above vector of row indices
-  spectronaut.lfq.report <- spectronaut.lfq.report[-rows_to_remove, ]
-  
-  rm(rows_to_remove, substring_to_remove)
+  spectronaut.lfq.report <- spectronaut.lfq.report %>%
+    filter(!grepl("Cont_|NaN|TRYP_PIG", PG.ProteinGroups))
 }
-```
-
-
-### Make protein metadata linker table
-
-During data processing via msStats most of the metadata we'd like to include for visualization or functional enrichment analysis is discarded. I find it useful to create a linker table early on containing all the metadata I want to crossmap back in based on a unique identifier. The best one I've found is the Uniprot accession ID column AKA **PG.ProteinAccession**.
-
-```{r}
-
-# Spectronaut specific protein linker table
-if (export.type == "SP") {
-  
-  # scrape a linker table for Uniprot IDs and Protein Names for later visualization
-  proteinNameCrossLookup <- subset(spectronaut.lfq.report, select = c(PG.ProteinAccessions, PG.ProteinNames))
-  
-# MaxQuant specific protein linker table
-} else if (export.type == "MQ") {
-  
-  # scrape a linker table for Uniprot IDs and Protein Names for later visualization
-  proteinNameCrossLookup <- subset(maxquant.proteingroups, select = c(`Protein IDs`, `Gene names`))
-}
-
-# rename columns for easy merging later
-colnames(proteinNameCrossLookup) <- c("Protein", "ProteinName")
-
-# filter to distinct protein IDs. %>% is an operator from the package magrittr which can be used to chain multiple functions together.
-proteinNameCrossLookup <- proteinNameCrossLookup %>% distinct(Protein, .keep_all = TRUE)
-
 ```
 
 ### Make Replicate column unique if set
@@ -310,19 +330,13 @@ Now is a good time to take a look at the raw data.
 This should be monomodal after the *SpectronauttoMSstatsFormat* filtering step
 
 ```{r}
-hist(log2(global.prepared$Intensity), breaks = 100)
-```
 
-The code block below is just for demonstration purposes. Marking specific thresholds can be useful for quality control or visualization purposes.
+ggplot(global.prepared, aes(x=log10(Intensity))) +
+  geom_histogram(binwidth = 0.05, fill = "gray", color = "black", alpha = 0.7) +
+  labs(title = "Histogram of Peptide Transition Intensities", x = "Log10(Intensity)", y = "Frequences") +
+  theme_bw()
 
-```{r}
-mean_intensity <- mean(global.prepared$Intensity, na.rm = TRUE)
-
-# Plot histogram with vertical line marking the mean
-ggplot(global.prepared, aes(x = log2(Intensity))) +
-  geom_histogram(binwidth=0.1, color="black", fill="white") +
-  geom_vline(xintercept = log2(mean_intensity), color="blue", linetype="dashed", size=1)
-  
+ggsave(paste(paste(data.name, "figures", sep = "_"), "Histogram - Peptide Transition Intensities.pdf", sep = "/"))
 
 ```
 
@@ -346,7 +360,7 @@ ggplot(unique_counts, aes(x = BioReplicate, y = Unique_Peptide_Count)) +
   theme_bw() +
   rotate.x.axis.text
 
-ggsave(paste(paste(data.name, "figures", sep = "_"), "UniqueFeaturesPerReplicate.pdf", sep = "/"))
+ggsave(paste(paste(data.name, "figures", sep = "_"), "Histogram - Peptides per Sample.pdf", sep = "/"))
 ```
 
 ### Get boxplot of quantitative values per sample
@@ -354,22 +368,33 @@ ggsave(paste(paste(data.name, "figures", sep = "_"), "UniqueFeaturesPerReplicate
 Just the same as the number of peptide sequences, we also expect related samples to have similar quantitative distributions. The APEX experimental workflow involved biotin labeling of proximal proteins and subsequent enrichment. As the control samples were not designed to undergo biotin labeling, the control samples ideally will have *lower* intensity distributions than the APEX samples.
 
 ```{r}
-ggplot (data = global.prepared, aes (x = paste0(BioReplicate),
-                          y = log10(Intensity), 
-                          fill = Condition)) + 
-  geom_boxplot() +
-  rotate.x.axis.text # this is defined in the default template of all my Rmd files
 
-ggsave(paste(paste(data.name, "figures", sep = "_"), "FeatureIntensitiesPerSample.pdf", sep = "/"))
+ggplot(data = global.prepared, aes (x = BioReplicate,
+                                                  y = log10(Intensity),
+                                                  fill = Condition)) +
+  geom_violin() +
+  geom_boxplot(width = 0.1, fill = "lightgray") +
+  labs(title = "Peptide Transition Intensities per Sample",
+       x = "Sample",
+       y = "Log10 Transition Intensity") +
+  rotate.x.axis.text
+
+ggsave(paste(paste(data.name, "figures", sep = "_"), "Peptide Transition Intensities per Sample.pdf", sep = "/"))
+
 ```
 
 # Use MSstats for protein summarization
 
 This is where we summarize peptides (or peptide transitions depending on your data export format) back into protein groups. Depending on your experiment, you're going to want to turn normalization on or off. For your typical APEX experiment, the control condition doesn't have Biotin Phenol meaning biotin enrichment does not occur. We expect an entirely different population of proteins to be enriched for in the BP samples, so its best to not do any sort of normalization at this point.
+```{r}
+
+global.proteinSummarization$ProteinLevelData$gene.name <- map.gene.names(global.proteinSummarization$ProteinLevelData$Protein)
+
+```
 
 ```{r}
 global.proteinSummarization = MSstats::dataProcess(global.prepared,
-                               normalization = 'FALSE',	# "equalizeMedians"			
+                               normalization = 'FALSE',	# "equalizeMedians"	once you remove non-BP controls for APEX samples	
                                logTrans = 2,				
                                featureSubset = 'highQuality',				
                                summaryMethod="TMP",
@@ -377,8 +402,12 @@ global.proteinSummarization = MSstats::dataProcess(global.prepared,
                                MBimpute=FALSE,				
                                maxQuantileforCensored=0.999)
 
-Save.Csv.With.Timestamp(global.proteinSummarization$FeatureLevelData, "FeatureLevelData.csv", paste(data.name, "data", sep = "_"))
-Save.Csv.With.Timestamp(global.proteinSummarization$ProteinLevelData, "ProteinLevelData.csv", paste(data.name, "data", sep = "_"))
+# Merge in protein names
+global.proteinSummarization$ProteinLevelData$gene.name <- map.gene.names(global.proteinSummarization$ProteinLevelData$Protein)
+
+# Write out data to CSVs
+Save.Csv.With.Timestamp(global.proteinSummarization$FeatureLevelData, "FeatureLevelData.csv", paste0(data.name, "data", sep = "_"))
+Save.Csv.With.Timestamp(global.proteinSummarization$ProteinLevelData, "ProteinLevelData.csv", paste0(data.name, "data", sep = "_"))
 ```
 
 # (Optional) Reload DataProcess results
@@ -397,6 +426,50 @@ If you ever want to go back & reanalyze data after the data process function, it
 
 ```
 
+# Do Principal Component Analysis
+look to see if there are serious batch effects, outlying samples, etc.
+```{r}
+
+# Go from long to wide format
+# Row names are protein groups
+# Columns are each sample's LogIntensity values for each protein
+intensity.matrix <- as.matrix(dcast(as.data.table(global.proteinSummarization$ProteinLevelData), Protein ~ SUBJECT, value.var = "LogIntensities"),
+                           rownames = "Protein")
+
+complete.data.matrix <- intensity.matrix[complete.cases(intensity.matrix),]
+
+# Do PCA
+pcaOut <- prcomp(t(complete.data.matrix))
+
+# Reshape from matrix to data table
+pcaDT <- as.data.table(pcaOut$x, keep.rownames=TRUE)
+
+# Add column named `mainGroup`. 
+# This value is derived from the rowname by splitting on '_' and grabbing the first element
+pcaDT[, Condition := tstrsplit(rn, "\\.")[[1]]] #transpose & split
+
+# Add column named `batch`. 
+# This value is derived from the rowname by splitting on '_' and grabbing the first element
+pcaDT[, Batch := sapply(strsplit(rn, "\\."), function(x) tail(x, 1))] #transpose & split
+
+pcaPercentVar <- round(100 * (pcaOut$sdev^2)/sum(pcaOut$sdev^2), 1)
+
+# Visualize PC1 and PC2, color data points by batch value.
+# You can also color data points by mainGroup or other factors that you scrape out above.
+p <- ggplot (pcaDT, aes(x=PC1, y=PC2, color = Condition )) + 
+  geom_point(alpha=1.0, size=4) + 
+  ggrepel::geom_text_repel(aes(label=rn), show.legend = FALSE, size = 3) +
+  theme_bw() + 
+  xlab (sprintf ("PC1, %.1f%%", pcaPercentVar[1])) + 
+  ylab (sprintf ("PC2, %.1f%%", pcaPercentVar[2])) + 
+  ggtitle (sprintf ("PCA using %d Proteins (log intensity)", nrow(complete.data.matrix))) 
+p
+
+# Optionally save the figure
+ggsave(paste(paste(data.name, "figures", sep = "_"), "Principal Component Analysis - Condition.pdf", sep = "/"))
+
+```
+
 # Plot protein intensities pre-normalization
 
 All of our peptide-level data has now been summarized into protein groups. Let's inspect the intensity distributions of this data. Note: the data process function already log2 transformed this data, so we don't have to ourselves.
@@ -404,19 +477,25 @@ All of our peptide-level data has now been summarized into protein groups. Let's
 ```{r}
 
 ggplot (global.proteinSummarization$ProteinLevelData, 
-        aes (x = interaction (SUBJECT, GROUP), 
+        aes (x = interaction (SUBJECT), 
              y = LogIntensities, 
              fill = GROUP)
         ) + 
-  geom_boxplot() + 
+  geom_violin() +
+  geom_boxplot(width = 0.1, fill = "lightgray") +
+  labs(title = "Protein Abundance Distributions",
+       x = "Replicate",
+       y = "Log2 Protein Abundance Intensity") +
   rotate.x.axis.text
 
-ggsave(paste(paste(data.name, "figures", sep = "_"), "ProteinIntensitiesPerSample.pdf", sep = "/"))
+ggsave(paste(paste(data.name, "figures", sep = "_"), "Protein Abundances per Sample.pdf", sep = "/"))
 
 ```
 
 ```{r}
+
 unique_counts <- global.proteinSummarization$ProteinLevelData %>%
+  filter(LogIntensities != 0) %>%
   filter(!is.na(LogIntensities)) %>%
   filter(!is.infinite(LogIntensities)) %>%
   group_by(GROUP) %>%
@@ -424,11 +503,10 @@ unique_counts <- global.proteinSummarization$ProteinLevelData %>%
 
 ggplot(unique_counts, aes(x = GROUP, y = Unique_Protein_Count)) +
   geom_bar(stat = "identity", fill = "skyblue", width = 0.5) +
+  geom_text(aes(label = Unique_Protein_Count), vjust = -0.5, color = "black", size = 3) +
   labs(title = "Count of Protein Groups per Condition",
        x = "Condition",
        y = "Number of Protein Groups") +
-  geom_vline(xintercept = 5.5, linetype = "dashed", color = "darkgray") +
-  geom_vline(xintercept = 10.5, linetype = "dashed", color = "darkgray") +
   rotate.x.axis.text
 
 ggsave(paste(paste(data.name, "figures", sep = "_"), "UniqueProteinGroupsPerCondition.pdf", sep = "/"))
@@ -437,19 +515,22 @@ ggsave(paste(paste(data.name, "figures", sep = "_"), "UniqueProteinGroupsPerCond
 # Plot average protein CVs per condition
 
 ```{r}
+
 proteomics_data <- global.proteinSummarization$ProteinLevelData %>%
   group_by(GROUP, Protein) %>%
   summarize(CV = sd(LogIntensities) / mean(LogIntensities) * 100)
 
 # Plot the distribution of CV for each group
-ggplot(proteomics_data, aes(x = GROUP, y = CV)) +
-  geom_boxplot() +
-  labs(title = "Coefficient of Variation Distribution by Group",
+ggplot(proteomics_data, aes(x = GROUP, y = CV, fill = GROUP)) +
+  geom_violin() +
+  geom_boxplot(width = 0.1, fill = "lightgray") +
+  labs(title = "Protein Coefficient of Variation Distribution by Group",
        x = "Please note CV's were calculated in Log2 space, not raw intensities",
        y = "Coefficient of Variation (%)") +
   rotate.x.axis.text
 
-ggsave(paste(paste(data.name, "figures", sep = "_"), "ProteinCVs.pdf", sep = "/"))
+ggsave(paste(paste(data.name, "figures", sep = "_"), "Protein CVs per Condition.pdf", sep = "/"))
+
 ```
 
 # Native Carboxylase Enrichment
@@ -507,8 +588,9 @@ contrast.matrix <- Make.LFQ.Contrast.Matrix (input.data.frame = global.proteinSu
 # Do pairwise comparison via MSstats using the provide contrast matrix, then select the comparison results
 
 global.pairwiseComparison <- MSstats::groupComparison(contrast.matrix, global.proteinSummarization)$ComparisonResult
-global.pairwiseComparison <- merge(global.pairwiseComparison, proteinNameCrossLookup, by = "Protein", all.x = TRUE)
 
+global.pairwiseComparison$gene.name <- map.gene.names(global.pairwiseComparison$Protein)
+  
 Save.Csv.With.Timestamp(global.pairwiseComparison, "GroupComparisonsData.csv", paste(data.name, "data", sep = "_"))
 
 ```
@@ -525,90 +607,46 @@ Do all the volcano plots for all experiment contrasts
 # Finally, makes the volcano plot
 lapply(global.regexContrasts, function(comparison) {
   
+  pvalue.threshold <- 0.05
+  log2FC.threshold <- 1 # Ruth likes log2(1.5)
+  
   # define significant proteins
   thisPairwiseComparison <- as.data.table(global.pairwiseComparison %>% filter(Label == comparison))
   
-  # Merge human readable protein names in case they're not there.
-  
+   
   ## This chunks adds a new column to our pairwise comparison data table
   # For all proteins with |Log2FC| < 1 and pval > 0.05, value is "Not"
   # For proteins with |Log2FC| >= 1 and pval <= 0.05, value is "Up" or "Down" as appropriate
   thisPairwiseComparison[, Significance := "Not"]
-  thisPairwiseComparison[pvalue < 0.05 & abs(log2FC) > log2(1.5),
+  thisPairwiseComparison[pvalue < pvalue.threshold & abs(log2FC) > log2FC.threshold,
          Significance := ifelse (log2FC > 0, "Up", "Down")]
   
-  ## Render volcano plots. Highlight arrestin and adrenoceptor beta 2
-  plot <- ggplot(thisPairwiseComparison, aes(x = log2FC, y = -log10(pvalue), color = Significance, label = ProteinName)) +
-    
-    # significance labels and lines
-    # vertical lines
-    geom_vline(xintercept = c(-log2(1.5), log2(1.5)), linetype = "dashed", color = "darkgray") +
-    annotate("text", x = c(-log2(1.5), log2(1.5)), y = 0, label = c("-Log2(1.5)", "Log2(1.5)"), vjust = 1, hjust = 0.5, color = "darkgray") +
-    
-    # horizontal line
-    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "darkgray") +
-    annotate("text", x = Inf, y = -log10(0.05), label = "p-val=0.05", hjust = 1, color = "darkgray") +
+  thisCondition1 <- strsplit(comparison, '-')[[1]][1]
+  thisCondition2 <- strsplit(comparison, '-')[[1]][2]
+  
+  ## Render volcano plots.
+  plot <- ggplot(thisPairwiseComparison, aes(x = log2FC, y = -log10(pvalue), color = Significance, label = gene.name)) +
   
     # circles representing proteins
-    geom_point() +
-    scale_color_manual(values = c(Not = "gray", Down = "blue", Up = "red")) +
+    geom_point(alpha = 0.8) +
+    scale_color_manual(values = c(Not = "gray", Down = "#67a9cf", Up = "#ef8a62")) +
     ggrepel::geom_text_repel(data = thisPairwiseComparison[Significance != "Not"], size = 2, max.overlaps = 20) +
+    labs(title = paste("Differential Protein Abundance Between", thisCondition1, "&", thisCondition2), x = paste("Protein Log2 Fold-change"), y = "-Log10(p-value)") +
     
-    # highlight people's favorite protein
-    geom_point(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ARRB2;DKFZp686L0365", ],
-               aes(x = log2FC, y = -log10(pvalue)), color = "green", size = 3) +
-    geom_text_repel(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "ARRB2;DKFZp686L0365", ],
-                    aes(x = log2FC, y = -log10(pvalue)), label = "ARRB2_HUMAN", color = "green", size = 3, box.padding = 0.5) +
     
-    geom_point(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "EEA1", ],
-               aes(x = log2FC, y = -log10(pvalue)), color = "green", size = 3) +
-    geom_text_repel(data = thisPairwiseComparison[thisPairwiseComparison$ProteinName == "EEA1", ],
-                    aes(x = log2FC, y = -log10(pvalue)), label = "EEA1_HUMAN", color = "green", size = 3, box.padding = 0.5) +
+   # significance labels and lines
+    # vertical lines
+    geom_vline(xintercept = c(-log2FC.threshold, log2FC.threshold), linetype = "dashed", color = "darkgray") +
+    annotate("text", x = c(-1.1, 1.1), y = 0, label = c("log2FC = -1", "log2FC = 1"), vjust = 0, hjust = c(1, 0), color = "black") +
+    
+    # horizontal line
+    geom_hline(yintercept = -log10(pvalue.threshold), linetype = "dashed", color = "darkgray") +
+    annotate("text", x = Inf, y = -log10(log2FC.threshold + 0.02), label = "pval = 0.05", vjust = 1, hjust = 1, color = "black") +
     theme_bw()
   
   print(plot)
   
-  ggsave(paste("./VolcanoPlot", paste(comparison, ".pdf", sep = ""), sep = "_"), plot)
+  ggsave(paste(paste(data.name, "figures", sep = "_"), paste("Protein - Volcano - ", comparison, ".pdf", sep = ""), sep = "/"))
 })
 
-```
-
-### Heatmaps
-
-```{r}
-
-# filter for significant changers
-# make heat map
-# Go enrichment on clusters
-pval.cutoff <- 0.05
-FC.cutoff <- 1
-
-# filter all proteins in group comparisons to having at least 1 significant changer in for each of our groups
-Filtered.Proteins <- as.data.table(
-  global.pairwiseComparison %>% 
-    group_by(ProteinName) %>% 
-    filter(any(adj.pvalue <= pval.cutoff & abs(log2FC) >= FC.cutoff))
-)
-
-Sig.Changing.Protein.Matrix <- as.matrix(dcast(Filtered.Proteins, Protein ~ Label, value.var = "log2FC"), rownames = "Protein")
-Sig.Changing.Protein.Matrix[is.infinite(Sig.Changing.Protein.Matrix)] <- 0
-Sig.Changing.Protein.Matrix[is.na(Sig.Changing.Protein.Matrix)] <- 0
-
-# UNCOMMENT TO SAVE HEATMAP
-#pdf("HeatMap_ADJUSTED.pdf")
-
-# Now create the heatmap
-
-heatmap <- Heatmap(
-  Sig.Changing.Protein.Matrix,
-  row_title = sprintf("%d proteins with\nadj.pval < 0.05 & |Log2FC| > 1", nrow(Sig.Changing.Protein.Matrix)),
-  name = "Log2FC of Labeled Timepoints\n",
-  show_row_names = FALSE,
-  cluster_columns = TRUE,
-  #km = 4
-)
-
-drawnHeatmap <- draw(heatmap)
-
-#dev.off()
 ```
