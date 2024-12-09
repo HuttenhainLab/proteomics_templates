@@ -386,11 +386,6 @@ ggsave(paste(paste(data.name, "figures", sep = "_"), "Peptide Transition Intensi
 # Use MSstats for protein summarization
 
 This is where we summarize peptides (or peptide transitions depending on your data export format) back into protein groups. Depending on your experiment, you're going to want to turn normalization on or off. For your typical APEX experiment, the control condition doesn't have Biotin Phenol meaning biotin enrichment does not occur. We expect an entirely different population of proteins to be enriched for in the BP samples, so its best to not do any sort of normalization at this point.
-```{r}
-
-global.proteinSummarization$ProteinLevelData$gene.name <- map.gene.names(global.proteinSummarization$ProteinLevelData$Protein)
-
-```
 
 ```{r}
 global.proteinSummarization = MSstats::dataProcess(global.prepared,
@@ -406,8 +401,8 @@ global.proteinSummarization = MSstats::dataProcess(global.prepared,
 global.proteinSummarization$ProteinLevelData$gene.name <- map.gene.names(global.proteinSummarization$ProteinLevelData$Protein)
 
 # Write out data to CSVs
-Save.Csv.With.Timestamp(global.proteinSummarization$FeatureLevelData, "FeatureLevelData.csv", paste0(data.name, "data", sep = "_"))
-Save.Csv.With.Timestamp(global.proteinSummarization$ProteinLevelData, "ProteinLevelData.csv", paste0(data.name, "data", sep = "_"))
+Save.Csv.With.Timestamp(global.proteinSummarization$FeatureLevelData, "FeatureLevelData.csv", paste(data.name, "data", sep = "_"))
+Save.Csv.With.Timestamp(global.proteinSummarization$ProteinLevelData, "ProteinLevelData.csv", paste(data.name, "data", sep = "_"))
 ```
 
 # (Optional) Reload DataProcess results
