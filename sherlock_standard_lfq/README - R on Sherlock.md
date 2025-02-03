@@ -190,7 +190,7 @@ Our general rule of thumb is to request memory *around* *3X* the file size of yo
 To give some examples of resource allocation requests:
 
 | Spectronaut Export Size | --time (d-hh:mm:ss) | --mem (G = GB) | --ntasks | --nodes |
-|:----------:|:--------------:|:-------:|:-------:|---------------------------|
+|:-----------------------:|:-------------------:|:--------------:|:--------:|---------|
 |          10 GB          |      0-6:00:00      |      30G       |    1     | 1       |
 |          25 GB          |     0-12:00:00      |      75G       |    1     | 1       |
 |          50 GB          |     1-00:00:00      |      150G      |    1     | 1       |
