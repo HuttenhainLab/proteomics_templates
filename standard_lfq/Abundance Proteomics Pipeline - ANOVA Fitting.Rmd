@@ -1,0 +1,509 @@
+---
+title: "timeseries_lfq_pipeline"
+author: "Dain Brademan"
+date: "2024-12-13"
+output: html_document
+---
+
+# README
+
+It is always good practice to start off any programming project with a quick *README* document or section. README documentation is a great way provide information to developers, users, or contributors of code that you wrote. Project overviews, purpose, setup instructions, and usage cases are great things to included in your README documents.
+
+### Pipeline Overview
+
+This R Markdown document was assembled is an add-on to the Huttenhain lab's general *lfq_pipeline.rmd* workflow. The general workflow is great at summarizing peptide-level data to protein-level, viewing general proteomics quality control figures, and conducting pairwise comparisons between individual experimental categories. Of course, there are more complicated experimental designs than solely 'Condition A vs. Condition B' where we would like to determine what proteins or PTMs are notably changing over a time series or range of agonist concentrations. Accomplishing this task is exactly why I've assembled this pipeline.
+
+### Setup
+
+The input data for this pipeline is assumed to be the *ProteinLevelData.csv* spreadsheet from the standard LFQ pipeline. This input data should be normalized to account for unnecessary sources of variation. I've assembled this section of the pipeline separately from the lfq pipeline for convenience, there is no reason why you couldn't copy/paste the code from this notebook at the end of the standard LFQ pipeline assuming you have time series data.
+
+**Please note, there will be several sections where you may need to sub-divide and ensure your time series or concentration series data are ranked in the correct order. Please ask if you have any questions**
+
+### Usage
+
+This pipeline supports protein level data that came from the MSstats::dataProcess function in the LFQ pipeline. This pipeline should be agnostic to proteomics data type, but you will need to make sure you are subsetting your data correctly at the beginning. I have generalized as much of the pipeline as I could, but there are still manual tweaks that need to be done.
+
+**MSstats dataProcess ProteinLevelData.csv**
+
+-   Protein-level Log2 abundances from the LFQ pipeline.
+
+-   Dataset is binned into individual time series for treatments, agonists, cell lines, etc.
+
+-   Each protein in each series is normalized to timepoint 0 or vehicle...
+
+-   ...and ANOVA test is conducted of a polynomial fit of protein abundance vs y = 0.
+
+### Load Packages
+
+If you get any errors regarding *Package not found*, just go back and install it using either *install.packages('packageName')* or *BiocManager::install('packageName')*! A general rule is the fully lowercase libraries are from CRAN and the CamelCase libraries are from BioConductor
+
+```{r}
+# Load Packages
+library(devtools)
+library (data.table)
+
+library (magrittr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+library(R.utils) # Actually a cran package
+
+library(UniProt.ws)
+library(purrr)
+
+# Plotting packages
+library (ggplot2)
+library(ggrepel)
+rotate.x.axis.text <- theme(axis.text.x = element_text(angle = 90,vjust = 0.5, hjust=1))
+
+# MSstats Packages
+library(MSstats)
+
+# EnrichR Complex Heatmap Package
+library (ComplexHeatmap)
+
+utils <- "https://raw.githubusercontent.com/HuttenhainLab/bp_utils/master/"
+source(paste0(utils,"ManageScriptData.R"))
+source(paste0(utils, "enrichmentTestFunctions.R"))
+source (paste0(utils,"MSstats_V4_Functions.R"))
+source(paste0(utils,"KinaseActivityScores.R"))
+source(paste0(utils,"MS_ModelFitting_TimeSeries.R"))
+source(paste0(utils,"UniprotIDMapping.R"))
+
+# Dain Utility Functions
+drb_utils <- "https://raw.githubusercontent.com/HuttenhainLab/drb_utils/master/"
+source(paste0(drb_utils,"data_management.R"))
+source(paste0(drb_utils,"spectronaut_data_cleaning.R"))
+source(paste0(drb_utils,"gene_ontology_enrichment.R"))
+source(paste0(drb_utils,"phosphokinase_enrichment_analysis.R"))
+
+# Define functions to bind gene names to a data table based on UniProt ID column
+map.gene.names <- function(protein.column, taxonomy.id = 9606) {
+  unique.phosphosites <- unique(unlist(strsplit(as.character(protein.column), ";")))
+  UniProt.IDs <- unique(sapply(unique.phosphosites, function(x) strsplit(x, "_")[[1]][1]))
+  
+  UniProt.mapping <- select(UniProt.ws(taxId = 9606), # 10090 = mouse
+                       keys = UniProt.IDs,
+                       columns = c("UniProtKB", "gene_primary"),
+                       keytype = "UniProtKB")
+  
+  # Create a named vector for fast lookup
+  gene.name.map <- setNames(UniProt.mapping$Gene.Names..primary., UniProt.mapping$From)
+  
+  # Function to replace UniProt IDs with gene names
+  map_protein <- function(entry) {
+    # Split the entry by semicolons
+    
+    phosphosites <- unlist(strsplit(entry, ";"))
+    
+    # Replace UniProt IDs with gene names
+    mapped_sites <- sapply(phosphosites, function(site) {
+      # Split the site by underscore to separate UniProt ID and the rest
+      parts <- unlist(strsplit(site, "_"))
+      UniProtID <- parts[1]
+      
+      # Check if the UniProt ID has a mapped gene name
+      gene_name <- gene.name.map[UniProtID]
+      
+      # If a gene name is found, use it; otherwise, keep the UniProt ID
+      if (!is.na(gene_name)) {
+        # Recombine the gene name with the remaining part
+        paste(c(gene_name, parts[-1]), collapse = "_")
+      } else {
+        # If no mapping exists, return the original site
+        site
+      }
+    })
+    
+    # Rejoin the mapped sites with semicolons
+    paste(mapped_sites, collapse = ";")
+  }
+  
+  # Apply the mapping function to each row of the protein column
+  mapped_column <- sapply(as.character(protein.column), map_protein)
+  
+  return(mapped_column)
+}
+
+```
+
+# Pipeline Parameters
+
+```{r}
+
+# Create new data directories for outputs
+data.name <- "NP02_TS_0p001pval"
+
+# create subdirectories to store intermediate tables and figures
+Create.Pipeline.Directories(data.name)
+
+protein.data.path <- "../data/20241205_ProteinLevelData.csv"
+
+# name of the labels you will split your dataset on
+series.labels <- c("WT", "ARRB", "GRK")
+
+# names of the labels in iterative ordinal rank [0-indexed]
+# The first entry must be timepoint 0 or vehicle
+series.rank.order = c("NP00", "NP01","NP05","NP10","NP30")
+
+pval.cutoff <- 0.001
+FC.cutoff <- log2(1.5)
+
+```
+
+# Load in protein data for all time series
+
+```{r}
+
+experiment.proteinData <- fread(protein.data.path)
+
+### SPECIAL CODE BLOCK TO FIX SWAPPED SAMPLES
+experiment.proteinData  <- experiment.proteinData  %>%
+  mutate(GROUP = ifelse(originalRUN == "TT003478_NP02-03_repeat", "ARRB_NP10", GROUP)) %>%
+  mutate(GROUP = ifelse(originalRUN == "TT003479_NP02-04_repeat", "ARRB_NP01", GROUP)) %>%
+  mutate(GROUP = ifelse(originalRUN == "TT003480_NP02-05_repeat", "ARRB_NP05", GROUP)) %>%
+  # SUBJECT
+  mutate(SUBJECT = ifelse(originalRUN == "TT003478_NP02-03_repeat", "ARRB_NP10.1", SUBJECT)) %>%
+  mutate(SUBJECT = ifelse(originalRUN == "TT003479_NP02-04_repeat", "ARRB_NP01.1", SUBJECT)) %>%
+  mutate(SUBJECT = ifelse(originalRUN == "TT003480_NP02-05_repeat", "ARRB_NP05.1", SUBJECT))
+
+experiment.proteinData$RUN <- factor(experiment.proteinData$RUN)
+experiment.proteinData$Protein <- factor(experiment.proteinData$Protein)
+experiment.proteinData$GROUP <- factor(experiment.proteinData$GROUP)
+
+```
+
+# Bin all proteomics data into their individual series
+
+The first thing you'll need to do is find some way to subset all of your proteomics data into all the individual series that you want to analyze into different parts of a list. I usually try to do this by matching a keyword that's contained in the GROUP name for the data belonging to each of my series using *grepl*. I use that below. You can always divide your data using other methods if that doesn't work for your particular dataset.
+```{r}
+
+# Takes your full protein-level dataset and separates the data based on the series labels provided above by matching 
+# e.g. c("WT", "ARRB", "GRK") 
+
+PROTEIN.data <- lapply(series.labels, function(series.label) {
+  
+  subset <- experiment.proteinData %>%
+  filter(grepl(series.label, GROUP))
+  
+  return (subset)
+  
+})
+
+names(PROTEIN.data) <- series.labels
+
+# Produces a list that has data tables containing your protein-level abundances per series
+# e.g.  
+# list(
+#   WT    = data.table containing only WT series data,
+#   ARRB  = data.table containing only ARRB series data,
+#   GRK   = data.table containing only GRK series data
+# )
+```
+
+
+# Rank order your series
+
+The polynomial fitting done later in the pipeline does not consider the absolute magnitude of the incoming series X-axis but instead uses Rank Order representations of these series that is stored numerically in a column named *rankTime*. 
+
+I typically do this using the strategy below where I take the SUBJECT column in the data table and modify it + add two new columns:
+
+  (1) Condition
+  (2) Timepoint
+  (3) SUBJECT
+  
+I then take the series timepoint values and ordinally rank them. 
+
+```{r}
+PROTEIN.data <- lapply(series.labels, function(series.label) {
+  
+  # Grab a each one of your targeted series
+  series.subset <- PROTEIN.data[[series.label]] %>%
+    filter(grepl(series.label, GROUP))
+  
+  # Substitute the period '.' with an underscore to make string splitting easier
+  series.subset[, SUBJECT := gsub("\\.", "_", SUBJECT)]
+  
+  # Take all the rows and split subject into Condition, Timepoint, and SUBJECT values
+  # e.g. WT_NP00.1 eventually turns into three columns containing | WT | NP00 | 1 |
+  series.subset <- series.subset %>%
+    separate(SUBJECT, into = c("Condition", "Timepoint", "SUBJECT"), sep = "_", remove = TRUE) %>%
+    mutate(rankTime = -1) %>%
+    mutate(rankTime = match(Timepoint, series.rank.order) - 1)
+  
+  return (as.data.table(series.subset))
+  
+})
+
+names(PROTEIN.data) <- series.labels
+```
+
+# Do polynomial fit then ANOVA test for each series
+
+```{r}
+
+PROTEIN.polyfits <- lapply(series.labels, function(series.label) {
+  
+  series.subset <- PROTEIN.data[[series.label]]
+
+  series.subset <- nicePolyFits.fullTable(series.subset)
+  
+  return (series.subset)
+}) 
+
+names(PROTEIN.polyfits) <- series.labels
+```
+
+## p.adjust then back-map in gene names to the data table
+
+```{r}
+
+polyfit.names <- names(PROTEIN.polyfits)
+
+PROTEIN.polyfits <- lapply(polyfit.names, function(polyfit.name) {
+  
+  print(sprintf("Conducting post-polyfit operations for '%s' data subset", polyfit.name))
+  
+  # first, remove any hits that failed polyfitting completely
+  subset <- PROTEIN.polyfits[[polyfit.name]] %>%
+    filter(!is.na(pvalue))
+  
+  print(sprintf("Adjusting pvals..."))
+  
+  # Bejamini-Hochberg correction
+  subset$adj.pvalue <- p.adjust(subset$pvalue)
+  
+  print(sprintf("Mapping gene names..."))
+  
+  # Map in gene names
+  subset$gene.name <- map.gene.names(subset$Protein)  
+  
+  print(sprintf("Finished with '%s' data subset", polyfit.name))
+  
+  return(subset)
+})
+
+# Reassign the names to ensure structure
+names(PROTEIN.polyfits) <- polyfit.names
+
+```
+
+# Do all regressions
+This takes each protein in each series and plots the actual protein log2 abundances normalized to timepoint 0
+```{r}
+
+invisible(lapply(polyfit.names, function(polyfit.name) {
+  
+  #cat(sprintf("Calculating all regressions for '%s' subset which pass significance thresholds of:\n", 
+  #            polyfit.name))
+  #cat(sprintf("    pval <= %f\n    |Log2-FC| >= %f\n\n", 
+  #            pval.cutoff, FC.cutoff))
+  
+  regression.polyfit.data <- PROTEIN.polyfits[[polyfit.name]]
+  
+  regression.protein.data <- PROTEIN.data[[polyfit.name]]
+  
+  regression.subset <- regression.polyfit.data  %>%
+    filter(pvalue <= pval.cutoff & abs(log2FC) >= FC.cutoff)
+  
+  target.proteins <- unique(regression.subset$Protein)
+  
+  lapply(target.proteins, function(protein) {
+    
+    #subset data
+    protein.specific.data <- regression.protein.data  %>%
+      filter(Protein == protein)
+    
+    # normalize the logIntensities to vehicle
+    regression.polyfit.row <- regression.polyfit.data %>%
+      filter(Protein == protein)
+    
+    vehicle.abundance <- regression.polyfit.row$actualWImputed.0
+    
+    protein.specific.data$polyfit.intensity <- protein.specific.data$LogIntensities - vehicle.abundance
+    
+    # Get gene name instead of uniprot ID
+    gene.name = protein.specific.data[1]$gene.name
+    
+    # Factor by rankTime for plotting
+    setorder(protein.specific.data, rankTime)
+
+    protein.specific.data[, Timepoint := factor(Timepoint, levels = series.rank.order)]
+    
+    # take regression.subset and extract the prediction curve
+    regression.prediction <- melt(
+      regression.polyfit.row, 
+      measure.vars = grep("^prediction\\.", names(regression.polyfit.row), value = TRUE), 
+      variable.name = "Timepoint", 
+      value.name = "Prediction Abundance"
+    )
+    regression.prediction <- regression.prediction[, c("Timepoint", "Prediction Abundance")]
+    regression.prediction$Timepoint <- series.rank.order
+    regression.prediction$`Prediction Abundance` <- regression.prediction$`Prediction Abundance` - vehicle.abundance
+    regression.prediction[, Timepoint := factor(Timepoint, levels = series.rank.order)]
+    regression.prediction$color <- "#323336"
+    
+    # Render plot.
+    p <- ggplot(protein.specific.data, aes(x = Timepoint, y = polyfit.intensity, color = SUBJECT)) +
+
+      # circles representing proteins
+      geom_point(size = 3) +
+      geom_path(
+        data = regression.prediction, 
+        group = 1, 
+        aes(x = Timepoint, y = `Prediction Abundance`),
+        linetype = "dashed",
+        color = "#323336",
+        linewidth = 1, 
+      ) +
+      labs(
+        title = paste0(gene.name, " - ", polyfit.name, " - Vehicle-normalized Agonist Regression"),
+        x = paste("Agonist Timepoint"),
+        y = "Normalized Protein Log2 Fold-change"
+      ) +
+
+     # significance labels and lines
+      geom_hline(yintercept = 0, linetype = "dashed", color = "darkgray") +
+      annotate("text", x = length(series.rank.order) + 0.5, y = -0.1, label = "Null Regression - Y = 0", vjust = -1, hjust = 1, color = "black") +
+      scale_x_discrete() +
+      theme_bw()
+    
+    ggsave(paste0(paste(paste(data.name, "figures", sep = "_"), "Regressions", polyfit.name, gene.name, sep = "/"), " - Timeseries Regression.pdf"), plot = p, create.dir = TRUE)
+    
+    print(p)
+    
+    cat(sprintf("Finished visualization of '%s' from '%s' subset\n", gene.name, polyfit.name))
+  })
+  cat("\n")
+}))
+
+
+```
+
+# Volcano plots for the polynomial fit significant changers
+Finally, take all the 
+```{r}
+
+invisible(lapply(polyfit.names, function(polyfit.name) {
+  
+  thisDataset <- PROTEIN.polyfits[[polyfit.name]]
+
+  thisDataset$Significance = "Not"
+  thisDataset[pvalue < pval.cutoff & abs(log2FC) > FC.cutoff & !is.nan(pvalue),
+           Significance := ifelse (log2FC  > 0, "Up", "Down")]
+  
+  # Filter out datapoints where pvalue is NaN or both pvalue & log2FC == 0
+  thisDataset <- thisDataset %>%
+    filter(!is.na(pvalue) & !(pvalue == 0 & log2FC == 0) & (log2FC != 0))
+  
+  ## Render volcano plots.
+  ggplot(thisDataset, aes(x = log2FC, y = -log10(pvalue), color = Significance, label = gene.name)) +
+  
+    # circles representing proteins
+    geom_point(alpha = 0.8) +
+    scale_color_manual(values = c(Not = "gray", Down = "#67a9cf", Up = "#ef8a62")) +
+    ggrepel::geom_text_repel(data = thisDataset[Significance != "Not"], size = 2, max.overlaps = 20) +
+    labs(title = paste("NP02", polyfit.name, "Timepoint ANOVA", sep = " - "), x = paste("Protein - Maximum log2FC"), y = "-log10(p-value)") +
+    
+   # significance labels and lines
+    # vertical lines
+    geom_vline(xintercept = c(-FC.cutoff, FC.cutoff), linetype = "dashed", color = "darkgray") +
+    annotate("text", x = c(-FC.cutoff - 0.1 * FC.cutoff, FC.cutoff + 0.1 * FC.cutoff), y = 0, label = c(paste0("log2FC = -", FC.cutoff), paste0("log2FC = ", FC.cutoff)), vjust = 0, hjust = c(1, 0), color = "black") +
+    
+    # horizontal line
+    geom_hline(yintercept = -log10(pval.cutoff), linetype = "dashed", color = "darkgray") +
+    annotate("text", x = Inf, y = -log10(pval.cutoff + pval.cutoff * 0.4), label = paste0("pval = ", pval.cutoff), vjust = 1, hjust = 1, color = "black") +
+    ylim(0, 16) +
+    theme_bw()
+  
+  ggsave(paste(paste(data.name, "figures", sep = "_"), paste0("Protein - Volcano - ", polyfit.name, ".pdf"), sep = "/"))
+  
+}))
+
+```
+
+# Save ANOVA series results as a combined csv file
+
+```{r}
+
+# Concatenate polyfit data tables together.
+PROTEIN.polyfits <- lapply(polyfit.names, function(polyfit.name) {
+  # first, label each polyfit subtable with condition marker
+   subset <- PROTEIN.polyfits[[polyfit.name]]
+   
+   subset$Knockout <- polyfit.name
+   
+   return (subset)
+})
+
+# Reassign the names to ensure structure
+names(PROTEIN.polyfits) <- polyfit.names
+
+# now combine tables
+PROTEIN.Combined.polyfits <- rbindlist(PROTEIN.polyfits)
+
+# Write out combined polyfit tables to a csv for ruthy
+Save.Csv.With.Timestamp(PROTEIN.Combined.polyfits, "Protein Timeseries ANOVA.csv", paste(data.name, "data", sep = "_"))
+
+```
+
+# Heatmap with Concentration-level data
+
+```{r}
+
+# filter all proteins in group comparisons to having at least 1 significant changer in for each of our groups that is positive
+Filtered.Sites <- as.data.table(
+  PROTEIN.Combined.polyfits %>% 
+    group_by(Protein) %>% 
+    filter(any(pvalue <= pval.cutoff & log2FC >= FC.cutoff))
+)
+
+Filtered.Sites$Start.Value <- Filtered.Sites$actualWImputed.0
+
+Filtered.Sites <- Filtered.Sites %>%
+  pivot_longer(
+    cols = starts_with("actualWImputed"),
+    names_to = "Measurement",
+    values_to = "Log2FC"
+  )
+
+# Crossmap series rank order labels
+# Assume all timepoints are the same for ease.
+Filtered.Sites$Series.RankOrder <- gsub("actualWImputed\\.", "", Filtered.Sites$Measurement)
+Filtered.Sites$Series.RankOrder <- as.numeric(Filtered.Sites$Series.RankOrder)
+Filtered.Sites$Series.RankOrder <- series.rank.order[Filtered.Sites$Series.RankOrder + 1]
+Filtered.Sites <- as.data.table(Filtered.Sites)
+Filtered.Sites$Log2FC <- Filtered.Sites$Log2FC - Filtered.Sites$Start.Value
+Filtered.Sites$col.label <- paste(Filtered.Sites$Knockout, Filtered.Sites$Series.RankOrder)
+
+Sig.Changing.Site.Matrix <- as.matrix(dcast(Filtered.Sites, gene.name ~ col.label, value.var = "Log2FC"), rownames = "gene.name")
+Sig.Changing.Site.Matrix[is.infinite(Sig.Changing.Site.Matrix)] <- 0
+Sig.Changing.Site.Matrix[is.na(Sig.Changing.Site.Matrix)] <- 0
+
+# Reorder columns to match concentration order
+# new_order <- c(5,1,3,4,2,15,11,13,14,12,10,8,6,7,9)
+# Sig.Changing.Site.Matrix <- Sig.Changing.Site.Matrix[, new_order]
+
+pdf(paste(paste(data.name, "figures", sep = "_"), "HeatMap - Series ANOVA.pdf", sep = "/"))
+
+heatmap <- Heatmap(
+  Sig.Changing.Site.Matrix,
+  column_title = "NP02 - Time Series ANOVA",
+  row_title = sprintf("%d Significantly Changing Proteins vs Timepoint 0", nrow(Sig.Changing.Site.Matrix)),
+  name = "Log2FC From Timepoint 0\n",
+  show_row_names = TRUE,
+  row_names_gp = gpar(fontsize = 8),
+  cluster_columns = FALSE
+  #height = unit(5, "mm") * nrow(Sig.Changing.Site.Matrix), 
+  #width = unit(5, "mm") * ncol(Sig.Changing.Site.Matrix)
+  
+  #km = 4
+)
+
+drawnHeatmap <- draw(heatmap)
+
+
+dev.off() 
+
+```
