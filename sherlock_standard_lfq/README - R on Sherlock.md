@@ -152,13 +152,15 @@ Here is an example SBATCH file that was used to process a \~80-sample dataset on
 #SBATCH --job-name=lfq_pipeline       
 #SBATCH --output=%j.lfq_pipeline.out
 #SBATCH --error=%j.lfq_pipeline.err
-#SBATCH --time=4-00:00:00
+#SBATCH --time=2-00:00:00
 #SBATCH --partition=normal
 #SBATCH --qos=long
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
+#SBATCH --nodes=1
 #SBATCH --mem=224G
-#SBATCH --mem-per-cpu=8G
+
+# Make sure R is loaded
+ml R
 
 # Define R arguments, file paths, and data processing parameters
 
@@ -190,7 +192,7 @@ Our general rule of thumb is to request memory *around* *3X* the file size of yo
 To give some examples of resource allocation requests:
 
 | Spectronaut Export Size | --time (d-hh:mm:ss) | --mem (G = GB) | --ntasks | --nodes |
-|:-----------------------:|:-------------------:|:--------------:|:--------:|---------|
+|:-----------:|:-----------:|:-----------:|:-----------:|---------------------|
 |          10 GB          |      0-6:00:00      |      30G       |    1     | 1       |
 |          25 GB          |     0-12:00:00      |      75G       |    1     | 1       |
 |          50 GB          |     1-00:00:00      |      150G      |    1     | 1       |

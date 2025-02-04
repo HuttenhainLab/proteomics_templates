@@ -585,13 +585,15 @@ jobs are closer to what is actually utilized.</p>
 #SBATCH --job-name=lfq_pipeline       
 #SBATCH --output=%j.lfq_pipeline.out
 #SBATCH --error=%j.lfq_pipeline.err
-#SBATCH --time=4-00:00:00
+#SBATCH --time=2-00:00:00
 #SBATCH --partition=normal
 #SBATCH --qos=long
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
+#SBATCH --nodes=1
 #SBATCH --mem=224G
-#SBATCH --mem-per-cpu=8G
+
+# Make sure R is loaded
+ml R
 
 # Define R arguments, file paths, and data processing parameters
 
@@ -637,11 +639,11 @@ impact these requirements, but this metric is harder to estimate.</p>
 <p>To give some examples of resource allocation requests:</p>
 <table>
 <colgroup>
-<col width="30%" />
-<col width="25%" />
-<col width="19%" />
-<col width="12%" />
-<col width="11%" />
+<col width="17%" />
+<col width="17%" />
+<col width="17%" />
+<col width="17%" />
+<col width="28%" />
 </colgroup>
 <thead>
 <tr class="header">
