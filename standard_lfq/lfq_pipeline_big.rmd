@@ -1,17 +1,17 @@
 ---
-title: "lfq_pipeline"
+title: "lfq_pipeline_big"
 author: "Dain Brademan"
 date: "2024-01-30"
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 ---
 
 # README
 
-It is always good practice to start off any programming project with a quick *README* document or section. README documentation is a great way provide information to developers, users, or contributors of code that you wrote. Project overviews, purpose, setup instructions, and usage cases are great things to included in your README documents.
-
 ### Pipeline Overview
 
-This R Markdown document was assembled to provide a one-size-fits-most solution for Huttenhain lab members to work up their mass spectrometry-based abundance proteomics data, specifically the data from APEX-enrichment experiments. The data that comes directly out from proteomics search engines like [Spectronaut](https://biognosys.com/software/spectronaut/) or [MaxQuant](https://www.maxquant.org/) are reported at the peptide or fragment ion level. These data need to be reassembled back to the protein level and require cleaning / curating before biological interpretation is conducted. We do this with a mix of custom code and a robust statistical framework named [MSstats](https://msstats.org/).
+Differs from the standard LFQ pipeline by leveraging the MSstatsBig import function instead of the standard converter
 
 ### Setup
 
