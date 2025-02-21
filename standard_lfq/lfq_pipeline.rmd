@@ -115,6 +115,7 @@ rotate.x.axis.text <- theme(axis.text.x = element_text(angle = 90,vjust = 0.5, h
 
 # MSstats Packages
 library(MSstats)
+library(MSstatsConvert)
 
 # EnrichR Complex Heatmap Package
 library (ComplexHeatmap)
@@ -351,8 +352,8 @@ unique_counts <- as.data.table(global.prepared) %>%
   group_by(BioReplicate) %>%
   summarize(Unique_Peptide_Count = n_distinct(PeptideSequence))
 
-ggplot(unique_counts, aes(x = BioReplicate, y = Unique_Peptide_Count)) +
-  geom_bar(stat = "identity", fill = "skyblue", width = 0.5) +
+ggplot(unique_counts, aes(x = BioReplicate, y = Unique_Peptide_Count, fill = Condition)) +
+  geom_bar(stat = "identity", width = 0.5) +
   geom_text(aes(label = Unique_Peptide_Count), vjust = -0.5, color = "black", size = 3) +
   labs(title = "Unique Peptide Sequences per Replicate",
        x = "Replicate",
@@ -372,8 +373,12 @@ Just the same as the number of peptide sequences, we also expect related samples
 ggplot(data = global.prepared, aes (x = BioReplicate,
                                                   y = log10(Intensity),
                                                   fill = Condition)) +
-  geom_violin() +
-  geom_boxplot(width = 0.1, fill = "lightgray") +
+  # Simpler boxplots for clarity
+  geom_boxplot() +
+  
+  # Violin plots if you want to be fancy
+  #geom_violin() +
+  #geom_boxplot(width = 0.1, fill = "lightgray") +
   labs(title = "Peptide Transition Intensities per Sample",
        x = "Sample",
        y = "Log10 Transition Intensity") +
@@ -496,15 +501,15 @@ unique_counts <- global.proteinSummarization$ProteinLevelData %>%
   group_by(GROUP) %>%
   summarize(Unique_Protein_Count = n_distinct(Protein))
 
-ggplot(unique_counts, aes(x = GROUP, y = Unique_Protein_Count)) +
-  geom_bar(stat = "identity", fill = "skyblue", width = 0.5) +
+ggplot(unique_counts, aes(x = GROUP, y = Unique_Protein_Count, fill = GROUP)) +
+  geom_bar(stat = "identity", width = 0.5) +
   geom_text(aes(label = Unique_Protein_Count), vjust = -0.5, color = "black", size = 3) +
   labs(title = "Count of Protein Groups per Condition",
        x = "Condition",
        y = "Number of Protein Groups") +
   rotate.x.axis.text
 
-ggsave(paste(paste(data.name, "figures", sep = "_"), "UniqueProteinGroupsPerCondition.pdf", sep = "/"))
+ggsave(paste(paste(data.name, "figures", sep = "_"), "Histogram - Protein Groups Per Condition.pdf", sep = "/"))
 ```
 
 # Plot average protein CVs per condition

@@ -1,17 +1,17 @@
 ---
-title: "lfq_pipeline_big"
+title: "lfq_pipeline - MSstats 4.0"
 author: "Dain Brademan"
-date: "2024-01-30"
-output:
-  pdf_document: default
-  html_document: default
+date: "2024-02-13"
+output: html_document
 ---
 
 # README
 
+It is always good practice to start off any programming project with a quick *README* document or section. README documentation is a great way provide information to developers, users, or contributors of code that you wrote. Project overviews, purpose, setup instructions, and usage cases are great things to included in your README documents.
+
 ### Pipeline Overview
 
-Differs from the standard LFQ pipeline by leveraging the MSstatsBig import function instead of the standard converter
+This R Markdown document was assembled to provide a one-size-fits-most solution for Huttenhain lab members to work up their mass spectrometry-based abundance proteomics data, specifically the data from APEX-enrichment experiments. The data that comes directly out from proteomics search engines like [Spectronaut](https://biognosys.com/software/spectronaut/) or [MaxQuant](https://www.maxquant.org/) are reported at the peptide or fragment ion level. These data need to be reassembled back to the protein level and require cleaning / curating before biological interpretation is conducted. We do this with a mix of custom code and a robust statistical framework named [MSstats](https://msstats.org/).
 
 ### Setup
 
@@ -97,7 +97,7 @@ Now that in theory everything is installed. Let's load our packages. If you get 
 # Load Packages
 library(devtools)
 library (data.table)
-library (pryr)
+
 library (magrittr)
 library(dplyr)
 library(tidyr)
@@ -115,7 +115,7 @@ rotate.x.axis.text <- theme(axis.text.x = element_text(angle = 90,vjust = 0.5, h
 
 # MSstats Packages
 library(MSstats)
-library(MSstatsBig)
+library(MSstatsConvert)
 
 # EnrichR Complex Heatmap Package
 library (ComplexHeatmap)
@@ -193,7 +193,7 @@ Enter in values specific to your dataset in this block and run all blocks of cod
 export.type <- "SP" 
 
 # Appended to all exported data/figures
-data.name <- "Example_Big_LFQ"
+data.name <- "MSstats_40"
 
 # create subdirectories to store intermediate tables and figures
 Create.Pipeline.Directories(data.name)
@@ -205,109 +205,20 @@ Create.Pipeline.Directories(data.name)
   # This will impact the statistical model either way.
 is.case.control = TRUE
 
-# File paths to your mass spec data in either MaxQuant or Spectronaut format
-if (export.type == "SP") {
-  # Spectronaut specific parameters
-  spectronaut.lfq.report <- "./example_data_spectronaut.tsv"
-} else if (export.type == "MQ") {
-  maxquant.evidence <- "../example_data/example_data_MQ_evidence.txt"
-  maxquant.proteingroups <- "../example_data/example_data_MQ_proteinGroups.txt"
-  maxquant.annotations <- "../example_data/example_data_MQ_annotations.csv"
-} else {
-  stop("Non-supported data type. Make sure data type is SP or MQ, otherwise pipeline will break.")
-}
+# File paths to your mass spec data in Spectronaut format
+spectronaut.lfq.report <- "./example_data_spectronaut.tsv"
 
-# Names of all possible contrasts will be generated from Condition names (formatted "ConditionName1-ConditionName2")
-  ## Example: regexContrasts <- c("Fsk-DMSO", "H2O2_Fsk-Fsk", "H2O2-DMSO", "H2O2_Fsk-H2O2")
-  ## This list should be strings that match your exact condition names that you entered in Spectronaut. 
-  ## You can also use RegEex terms if you know what you're doing, but I find it more exact to use full condition names to avoid accidental     RegEx matches
-
-global.regexContrasts <- c(
-  # 0 minute APEX vs no biotinylation control
-  "0m_40-ctrl_40", "0m_50-ctrl_50", "0m_60-ctrl_60", "0m_70-ctrl_70", "0m_80-ctrl_80",
-  
-  # 5 minute APEX vs no biotinylation control
-  "5m_40-ctrl_40", "5m_50-ctrl_50", "5m_60-ctrl_60", "5m_70-ctrl_70", "5m_80-ctrl_80",
-  
-  # 5 minute APEX vs 0 minute APEX                          
-  "5m_40-0m_40", "5m_50-0m_50", "5m_60-0m_60", "5m_70-0m_70", "5m_80-0m_80"
-)
-
-
-# Sometimes you want to remove certain runs because they're bad, or before data normalization. 
-# You can also do this at the condition level for ease, but you'll need to modify the code in the post-normalization section to do this
-# Specify the runs here. 
-runs.to.remove <- c()
-# Uncomment the below line to remove the "control" samples before median normalization
-# runs.to.remove <- c("TT000243_AM04-01","TT000244_AM04-02","TT000245_AM04-03","TT000246_AM04-04","TT000247_AM04-05","TT000254_AM04-12","TT000255_AM04-13","TT000256_AM04-14","TT000257_AM04-15","TT000258_AM04-16")
 ```
 
 # Import Data
 
-The Spectronaut report for large datasets are too large to read into memory for the primary MSstats pipeline. To solve this, we need to use an alternative approach to pre-process the Spectronaut export. To do this, we use a package named MSstatsBig which handles the Spectronaut export in chunks.
+This reads the proteomics search engine data verbatim and loads it into a data frame. You can see this data frame in the environment window. (default location: upper left)
 ```{r}
 
-# Before pre-processing, we need to hot-swap the values of "F.PeakArea" and "F.NormalizedPeakArea" in the input file as MSstatsBig only uses normalized peak area.
+spectronaut.lfq.report <- fread(spectronaut.lfq.report, sep = '\t')
 
-# File needs to go in [DATA.NAME]_data/swapped_[INPUTFILE.TSV]
-swapped.report <- paste(data.name, "data/swapped", basename(spectronaut.lfq.report), sep = "_")
-
-# Read the column headers of the input files to get the column indices of the columns to swap
-fread(spectronaut.lfq.report, nrows = 1) -> header_df  
-header <- names(header_df)
-column.area <- which(header == "F.PeakArea")
-column.normalized.area <- which(header == "F.NormalizedPeakArea")
-
-# Open simultaneous reader and writer
-reader <- file(spectronaut.lfq.report, "r")
-writer <- file(swapped.report, "w")
-
-# Read and write header
-header_line <- readLines(reader, n = 1)
-writeLines(header_line, writer)
-
-# Process line by line
-repeat {
-
-    line <- readLines(reader, n = 1)
-  if (length(line) == 0) break  # Stop if EOF
-
-  values <- strsplit(line, "\t")[[1]]
-  
-  # Swap the two columns
-  temp <- values[column.area]
-  values[column.area] <- values[column.normalized.area]
-  values[column.normalized.area] <- temp
-  
-  # Write the modified line
-  writeLines(paste(values, collapse = "\t"), writer)
-}
-
-# Close connections
-close(reader)
-close(writer)
-
-# Arrow
-library(arrow)
-
-global.prepared <-  bigSpectronauttoMSstatsFormat(
-  input_file = swapped.report,
-  output_file_name = "output_file.csv",
-  backend="arrow",
-  filter_by_excluded = TRUE,
-  filter_by_identified = FALSE,
-  filter_by_qvalue = TRUE,
-  qvalue_cutoff = 0.01,
-  max_feature_count = 20,
-  filter_unique_peptides = TRUE,
-  aggregate_psms = FALSE,
-  filter_few_obs = FALSE,
-  remove_annotation = FALSE,
-  connection = NULL
-)
-
-global.prepared <- as.data.frame(dplyr::collect(global.prepared))
-
+# If fread is causing R to crash due to memory, you can try using read.csv instead. Slower, but uses less memory. 
+# spectronaut.lfq.report <- read.csv(spectronaut.lfq.report, sep = '\t')
 
 ```
 
@@ -319,7 +230,7 @@ It's recommended to include commonly observed contaminant proteins when processi
 
 # remove all contaminant proteins.
 spectronaut.lfq.report <- spectronaut.lfq.report %>%
-  filter(!grepl("NaN|TRYP_PIG", PG.ProteinGroups))
+  filter(!grepl("Cont_|NaN|TRYP_PIG", PG.ProteinGroups))
 
 ```
 
@@ -340,29 +251,20 @@ Most proteomic pipelines by default do not export data in the format that msStat
 After this stage, we will no longer need to write special code to handle Spectronaut vs MaxQuant data
 
 ```{r}
-if (export.type == "SP") {
-  
-  # the optional arguments are recommended in the msStats user guide. Feel free to change if you know better.
-  global.prepared <- SpectronauttoMSstatsFormat(spectronaut.lfq.report,
-                                       filter_with_Qvalue = TRUE, ## same as default
-                                       qvalue_cutoff = 0.01, ## same as default
-                                       removeProtein_with1Feature = FALSE,
-                                       use_log_file = FALSE
-                                       )
-  
-  rm(spectronaut.lfq.report)
-  
-  Save.Csv.With.Timestamp(global.prepared, "CleanedPreprocessedData.csv", paste(data.name, "data", sep = "_"))
-                          
-} else if (export.type == "MQ") {
-  
-  global.prepared <- MaxQtoMSstatsFormat(maxquant.evidence, 
-                                       maxquant.annotations, 
-                                       maxquant.proteingroups)
-  
-  rm(maxquant.evidence, maxquant.annotations, maxquant.proteingroups)
-}
 
+# the optional arguments are recommended in the msStats user guide. Feel free to change if you know better.
+global.prepared <- SpectronauttoMSstatsFormat(spectronaut.lfq.report,
+                                     filter_with_Qvalue = TRUE, ## same as default
+                                     qvalue_cutoff = 0.01, ## same as default
+                                     removeProtein_with1Feature = FALSE,
+                                     use_log_file = FALSE
+                                     )
+
+rm(spectronaut.lfq.report)
+
+Save.Csv.With.Timestamp(global.prepared, "CleanedPreprocessedData.csv", paste(data.name, "data", sep = "_"))
+
+gc()
 ```
 
 ### Remove any unwanted runs
@@ -386,7 +288,7 @@ This should be monomodal after the *SpectronauttoMSstatsFormat* filtering step
 
 ggplot(global.prepared, aes(x=log10(Intensity))) +
   geom_histogram(binwidth = 0.05, fill = "gray", color = "black", alpha = 0.7) +
-  labs(title = "Histogram of Peptide Transition Intensities", x = "Log10(Intensity)", y = "Frequencies") +
+  labs(title = "Histogram of Peptide Transition Intensities", x = "Log10(Intensity)", y = "Frequences") +
   theme_bw()
 
 ggsave(paste(paste(data.name, "figures", sep = "_"), "Histogram - Peptide Transition Intensities.pdf", sep = "/"))
@@ -404,8 +306,8 @@ unique_counts <- as.data.table(global.prepared) %>%
   group_by(BioReplicate) %>%
   summarize(Unique_Peptide_Count = n_distinct(PeptideSequence))
 
-ggplot(unique_counts, aes(x = BioReplicate, y = Unique_Peptide_Count)) +
-  geom_bar(stat = "identity", fill = "skyblue", width = 0.5) +
+ggplot(unique_counts, aes(x = BioReplicate, y = Unique_Peptide_Count, fill = Condition)) +
+  geom_bar(stat = "identity", width = 0.5) +
   geom_text(aes(label = Unique_Peptide_Count), vjust = -0.5, color = "black", size = 3) +
   labs(title = "Unique Peptide Sequences per Replicate",
        x = "Replicate",
@@ -440,15 +342,22 @@ ggsave(paste(paste(data.name, "figures", sep = "_"), "Peptide Transition Intensi
 
 This is where we summarize peptides (or peptide transitions depending on your data export format) back into protein groups. Depending on your experiment, you're going to want to turn normalization on or off. For your typical APEX experiment, the control condition doesn't have Biotin Phenol meaning biotin enrichment does not occur. We expect an entirely different population of proteins to be enriched for in the BP samples, so its best to not do any sort of normalization at this point.
 
+### Implement MSstats V4.0 pipeline instead of straight MSstats::dataProcess() function
 ```{r}
-global.proteinSummarization = MSstats::dataProcess(global.prepared,
-                               normalization = 'FALSE',	# "equalizeMedians"	once you remove non-BP controls for APEX samples	
-                               logTrans = 2,				
-                               featureSubset = 'highQuality',				
-                               summaryMethod="TMP",
-                               censoredInt='NA',				
-                               MBimpute=FALSE,				
-                               maxQuantileforCensored=0.999)
+
+normalization <- "equalizeMedians"
+summary.method = "TMP"
+
+intermediate.dataset = MSstatsPrepareForDataProcess(global.prepared, log_base = 2, fix_missing = "zero_to_na")
+intermediate.dataset = MSstatsNormalize(intermediate.dataset, normalization)
+intermediate.dataset = MSstatsHandleMissing(intermediate.dataset, summary.method, impute = TRUE, missing_symbol = "NA", censored_cutoff = 0.999)
+intermediate.dataset = MSstatsSelectFeatures(intermediate.dataset, "highQuality", top_n = 3, min_feature_count = 2)
+intermediate.dataset = MSstatsPrepareForSummarization(intermediate.dataset, summary.method, impute = TRUE, censored_symbol = "NA", remove_uninformative_feature_outlier = FALSE)
+
+summarized.dataset = MSstatsSummarizeWithSingleCore(intermediate.dataset, summary.method, impute = TRUE, censored_symbol = "NA", remove50missing = FALSE, equal_variance = TRUE)
+# MacOS and Linux can use MSstatsSUmmarizeWithMultiCore
+# summarized.dataset = MSstatsSummarizeWithMultiCore(intermediate.dataset, summary.method, impute = TRUE, censored_symbol = "NA", remove50missing = FALSE, equal_variance = TRUE)
+global.proteinSummarization = MSstatsSummarizationOutput(intermediate.dataset, summarized.dataset, processed.dataset, summary.method, impute = TRUE, censored_symbol = "NA")
 
 # Merge in protein names
 global.proteinSummarization$ProteinLevelData$gene.name <- map.gene.names(global.proteinSummarization$ProteinLevelData$Protein)
@@ -456,21 +365,21 @@ global.proteinSummarization$ProteinLevelData$gene.name <- map.gene.names(global.
 # Write out data to CSVs
 Save.Csv.With.Timestamp(global.proteinSummarization$FeatureLevelData, "FeatureLevelData.csv", paste(data.name, "data", sep = "_"))
 Save.Csv.With.Timestamp(global.proteinSummarization$ProteinLevelData, "ProteinLevelData.csv", paste(data.name, "data", sep = "_"))
-```
 
+```
 # (Optional) Reload DataProcess results
 
 If you ever want to go back & reanalyze data after the data process function, it can be frustrating to have to run through the entire pipeline again up to this point.
 
 ```{r}
-# global.proteinSummarization <- list(ProteinLevelData = NULL, FeatureLevelData = NULL)
+global.proteinSummarization <- list(ProteinLevelData = NULL, FeatureLevelData = NULL)
 
-# global.proteinSummarization$ProteinLevelData <- fread(paste0(paste(data.name, "data/", sep = "_"), "20240326_ProteinLevelData.csv"))
-# global.proteinSummarization$FeatureLevelData <- fread(paste0(paste(data.name, "data/", sep = "_"), "20240326_FeatureLevelData.csv"))
+global.proteinSummarization$ProteinLevelData <- fread(paste(paste(data.name, "data", sep = "_"), "20250130_ProteinLevelData.csv", sep='/'))
+global.proteinSummarization$FeatureLevelData <- fread(paste(paste(data.name, "data", sep = "_"), "20250130_FeatureLevelData.csv", sep='/'))
 
-# global.proteinSummarization$ProteinLevelData$RUN <- factor(global.proteinSummarization$ProteinLevelData$RUN)
-# global.proteinSummarization$ProteinLevelData$Protein <- factor(global.proteinSummarization$ProteinLevelData$Protein)
-# global.proteinSummarization$ProteinLevelData$GROUP <- factor(global.proteinSummarization$ProteinLevelData$GROUP)
+global.proteinSummarization$ProteinLevelData$RUN <- factor(global.proteinSummarization$ProteinLevelData$RUN)
+global.proteinSummarization$ProteinLevelData$Protein <- factor(global.proteinSummarization$ProteinLevelData$Protein)
+global.proteinSummarization$ProteinLevelData$GROUP <- factor(global.proteinSummarization$ProteinLevelData$GROUP)
 
 ```
 
@@ -536,7 +445,7 @@ ggplot (global.proteinSummarization$ProteinLevelData,
        y = "Log2 Protein Abundance Intensity") +
   rotate.x.axis.text
 
-ggsave(paste(paste(data.name, "figures", sep = "_"), "Protein Abundances per Sample.pdf", sep = "/"))
+ggsave(paste(paste(data.name, "figures", sep = "_"), "Protein Abundances per Sample.pdf", sep = "/"), width= 15)
 
 ```
 
@@ -549,15 +458,15 @@ unique_counts <- global.proteinSummarization$ProteinLevelData %>%
   group_by(GROUP) %>%
   summarize(Unique_Protein_Count = n_distinct(Protein))
 
-ggplot(unique_counts, aes(x = GROUP, y = Unique_Protein_Count)) +
-  geom_bar(stat = "identity", fill = "skyblue", width = 0.5) +
+ggplot(unique_counts, aes(x = GROUP, y = Unique_Protein_Count, fill = GROUP)) +
+  geom_bar(stat = "identity", width = 0.5) +
   geom_text(aes(label = Unique_Protein_Count), vjust = -0.5, color = "black", size = 3) +
   labs(title = "Count of Protein Groups per Condition",
        x = "Condition",
        y = "Number of Protein Groups") +
   rotate.x.axis.text
 
-ggsave(paste(paste(data.name, "figures", sep = "_"), "UniqueProteinGroupsPerCondition.pdf", sep = "/"))
+ggsave(paste(paste(data.name, "figures", sep = "_"), "UniqueProteinGroupsPerCondition.pdf", sep = "/"), width= 15)
 ```
 
 # Plot average protein CVs per condition
@@ -568,6 +477,11 @@ proteomics_data <- global.proteinSummarization$ProteinLevelData %>%
   group_by(GROUP, Protein) %>%
   summarize(CV = sd(LogIntensities) / mean(LogIntensities) * 100)
 
+mean_cv_data <- proteomics_data %>%
+  group_by(GROUP) %>%
+  filter(CV >= 0) %>%
+  summarize(mean_CV = median(CV, na.rm = TRUE))
+
 # Plot the distribution of CV for each group
 ggplot(proteomics_data, aes(x = GROUP, y = CV, fill = GROUP)) +
   geom_violin() +
@@ -575,9 +489,15 @@ ggplot(proteomics_data, aes(x = GROUP, y = CV, fill = GROUP)) +
   labs(title = "Protein Coefficient of Variation Distribution by Group",
        x = "Please note CV's were calculated in Log2 space, not raw intensities",
        y = "Coefficient of Variation (%)") +
+  
+  geom_text(data = mean_cv_data, aes(x = GROUP, y = -5, label = round(mean_CV, 2)),
+            color = "black", vjust = 1) +
+  ylim(-5, 100) +
+  
+  theme_bw() +
   rotate.x.axis.text
 
-ggsave(paste(paste(data.name, "figures", sep = "_"), "Protein CVs per Condition.pdf", sep = "/"))
+ggsave(paste(paste(data.name, "figures", sep = "_"), "Protein CVs per Condition.pdf", sep = "/"), width= 15)
 
 ```
 

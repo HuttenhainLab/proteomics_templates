@@ -2,9 +2,12 @@
 title: "README - R on Sherlock"
 author: "Dain Brademan"
 date: "2025-01-07"
+urlcolor: blue
+linkcolor: red
 output:
   pdf_document: default
   html_document: default
+
 ---
 
 A quick guide for running the Huttenhain lab's proteomic pipelines on Sherlock, Stanford's high-throughput computing resource. More info can be found using [Sherlock's online resources](https://www.sherlock.stanford.edu/docs/software/using/R/).
