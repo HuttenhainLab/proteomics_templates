@@ -349,7 +349,7 @@ For a general abundance proteomics APEX experiment, we would hope for 70,000+ pe
 unique_counts <- as.data.table(global.prepared) %>%
   filter(!is.na(Intensity)) %>%
   filter(Intensity != 0) %>%
-  group_by(BioReplicate) %>%
+  group_by(Condition, BioReplicate) %>%
   summarize(Unique_Peptide_Count = n_distinct(PeptideSequence))
 
 ggplot(unique_counts, aes(x = BioReplicate, y = Unique_Peptide_Count, fill = Condition)) +
@@ -481,8 +481,12 @@ ggplot (global.proteinSummarization$ProteinLevelData,
              y = LogIntensities, 
              fill = GROUP)
         ) + 
-  geom_violin() +
-  geom_boxplot(width = 0.1, fill = "lightgray") +
+  # Simpler boxplots for clarity
+  geom_boxplot() +
+  
+  # Violin plots if you want to be fancy
+  #geom_violin() +
+  #geom_boxplot(width = 0.1, fill = "lightgray") +
   labs(title = "Protein Abundance Distributions",
        x = "Replicate",
        y = "Log2 Protein Abundance Intensity") +
@@ -520,13 +524,24 @@ proteomics_data <- global.proteinSummarization$ProteinLevelData %>%
   group_by(GROUP, Protein) %>%
   summarize(CV = sd(LogIntensities) / mean(LogIntensities) * 100)
 
+mean_cv_data <- proteomics_data %>%
+  group_by(GROUP) %>%
+  filter(CV >= 0) %>%
+  summarize(mean_CV = median(CV, na.rm = TRUE))
+
 # Plot the distribution of CV for each group
 ggplot(proteomics_data, aes(x = GROUP, y = CV, fill = GROUP)) +
-  geom_violin() +
-  geom_boxplot(width = 0.1, fill = "lightgray") +
+
+  geom_boxplot() +
   labs(title = "Protein Coefficient of Variation Distribution by Group",
        x = "Please note CV's were calculated in Log2 space, not raw intensities",
        y = "Coefficient of Variation (%)") +
+  
+  geom_text(data = mean_cv_data, aes(x = GROUP, y = -5, label = round(mean_CV, 2)),
+            color = "black", vjust = 1) +
+  ylim(-5, 100) +
+  
+  theme_bw() +
   rotate.x.axis.text
 
 ggsave(paste(paste(data.name, "figures", sep = "_"), "Protein CVs per Condition.pdf", sep = "/"))

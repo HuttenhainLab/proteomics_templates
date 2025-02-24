@@ -10,22 +10,29 @@ output: html_document
 Now that in theory everything is installed. Let's load our packages. If you get any errors regarding **Package not found**, just go back and install it! A general rule is the fully lowercase libraries are from CRAN and the CamelCase libraries are from BioConductor
 
 ```{r}
-# Load Packages
-library(MSstats)
-library(MSstatsPTM)
+# R Packages
+
 library(dplyr)
 library(R.utils) # Actually a cran package
 library(dplyr)
 library(svglite)
 library (data.table)
-library (ComplexHeatmap) # not needed in this code
 library (circlize)
 library (ggplot2)
-rotate.x.axis.text <- theme(axis.text.x = element_text(angle = 90,vjust = 0.5, hjust=1))
 library (magrittr)
 library (pbapply)
 library(ggrepel)
 library(plotly)
+
+# Bioconductor Packages
+library(MSstats)
+library(MSstatsConvert)
+library(MSstatsPTM)
+library(UniProt.ws)
+library (ComplexHeatmap) # not needed in this code
+
+rotate.x.axis.text <- theme(axis.text.x = element_text(angle = 90,vjust = 0.5, hjust=1))
+
 
 # Krogan Lab Utility Functions
 utils <- "https://raw.githubusercontent.com/HuttenhainLab/bp_utils/master/"
@@ -33,8 +40,6 @@ source(paste0(utils,"ManageScriptData.R"))
 source(paste0(utils, "enrichmentTestFunctions.R"))
 source (paste0(utils,"MSstats_V4_Functions.R"))
 source(paste0(utils,"KinaseActivityScores.R"))       
-WriteSessionInfo()
-WriteInstalledPackages()
 
 # Dain Utility Functions
 drb_utils <- "https://raw.githubusercontent.com/HuttenhainLab/drb_utils/main/"
