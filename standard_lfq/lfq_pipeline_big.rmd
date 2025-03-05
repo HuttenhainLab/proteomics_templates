@@ -275,9 +275,7 @@ repeat {
   values <- strsplit(line, "\t")[[1]]
   
   # Swap the two columns
-  temp <- values[column.area]
-  values[column.area] <- values[column.normalized.area]
-  values[column.normalized.area] <- temp
+  values[column.normalized.area] <- values[column.area]
   
   # Write the modified line
   writeLines(paste(values, collapse = "\t"), writer)
@@ -318,8 +316,8 @@ It's recommended to include commonly observed contaminant proteins when processi
 ```{r}
 
 # remove all contaminant proteins.
-spectronaut.lfq.report <- spectronaut.lfq.report %>%
-  filter(!grepl("NaN|TRYP_PIG", PG.ProteinGroups))
+global.prepared <- global.prepared %>%
+  filter(!grepl("Cont_", ProteinName))
 
 ```
 
@@ -329,41 +327,10 @@ This prevents MSstats from treating experimental/technical replicates as biorepl
 
 ```{r}
 if (is.case.control) {
-  spectronaut.lfq.report$R.Replicate <- paste(spectronaut.lfq.report$R.Condition, spectronaut.lfq.report$R.Replicate, sep = ".")
+  global.prepared$BioReplicate <- paste(global.prepared$Condition, global.prepared$BioReplicate, sep = ".")
 }
 ```
 
-### Reformat data for msStats Data Processing
-
-Most proteomic pipelines by default do not export data in the format that msStat expects for protein grouping and normalization. Fortunately for us, msStats already has a built-in converter function that we can take advantage of with minimal effort. While it's not the worst thing to reformat this data ourselves, work smarter, not harder.
-
-After this stage, we will no longer need to write special code to handle Spectronaut vs MaxQuant data
-
-```{r}
-if (export.type == "SP") {
-  
-  # the optional arguments are recommended in the msStats user guide. Feel free to change if you know better.
-  global.prepared <- SpectronauttoMSstatsFormat(spectronaut.lfq.report,
-                                       filter_with_Qvalue = TRUE, ## same as default
-                                       qvalue_cutoff = 0.01, ## same as default
-                                       removeProtein_with1Feature = FALSE,
-                                       use_log_file = FALSE
-                                       )
-  
-  rm(spectronaut.lfq.report)
-  
-  Save.Csv.With.Timestamp(global.prepared, "CleanedPreprocessedData.csv", paste(data.name, "data", sep = "_"))
-                          
-} else if (export.type == "MQ") {
-  
-  global.prepared <- MaxQtoMSstatsFormat(maxquant.evidence, 
-                                       maxquant.annotations, 
-                                       maxquant.proteingroups)
-  
-  rm(maxquant.evidence, maxquant.annotations, maxquant.proteingroups)
-}
-
-```
 
 ### Remove any unwanted runs
 
