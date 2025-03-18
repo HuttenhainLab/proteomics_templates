@@ -83,7 +83,7 @@ map.gene.names <- function(protein.column, taxonomy.id = 9606) {
   unique.phosphosites <- unique(unlist(strsplit(as.character(protein.column), ";")))
   UniProt.IDs <- unique(sapply(unique.phosphosites, function(x) strsplit(x, "_")[[1]][1]))
   
-  UniProt.mapping <- AnnotationDbi::select(UniProt.ws(taxId = 9606), # 10090 = mouse
+  UniProt.mapping <- select(UniProt.ws(taxId = 9606), # 10090 = mouse
                        keys = UniProt.IDs,
                        columns = c("UniProtKB", "gene_primary"),
                        keytype = "UniProtKB")
@@ -133,19 +133,29 @@ map.gene.names <- function(protein.column, taxonomy.id = 9606) {
 ```{r}
 
 # Create new data directories for outputs
-data.name <- "NP02_TS_0p001pval"
+data.name <- "EB10_Abundance"
 
 # create subdirectories to store intermediate tables and figures
 Create.Pipeline.Directories(data.name)
 
-protein.data.path <- "../data/20241205_ProteinLevelData.csv"
+protein.data.path <- "./EB10_data/AB/20250201_ProteinLevelData.csv"
 
 # name of the labels you will split your dataset on
-series.labels <- c("WT", "ARRB", "GRK")
+series.labels <- c("Iso_1min", "Iso_15min", "NECA_1min","NECA_15min", "VIP_1min", "VIP_15min")
 
 # names of the labels in iterative ordinal rank [0-indexed]
 # The first entry must be timepoint 0 or vehicle
-series.rank.order = c("NP00", "NP01","NP05","NP10","NP30")
+# series.rank.order = c("NP00", "NP01","NP05","NP10","NP30")
+
+rank.order.lists = list(
+  Iso = c("NA", "100pM", "300pM", "1nM", "3nM", "10nM", "30nM", "100nM", "300nM"),
+  NECA = c("NA", "30nM", "100nM", "300nM", "1μM", "3μM", "10μM", "30μM", "100μM"),
+  VIP = c("NA", "10pM", "30pM", "100pM", "300pM", "1nM", "3nM", "10nM", "30nM")
+)
+
+# ISO: series.rank.order = c("NA", "100pM", "300pM", "1nM", "3nM", "10nM", "30nM", "100nM", "300nM")
+# NECA: series.rank.order = c("NA", "30nM", "100nM", "300nM", "1μM", "3μM", "10μM", "30μM", "100μM")
+# VIP: series.rank.order = c("NA", "10pM", "30pM", "100pM", "300pM", "1nM", "3nM", "10nM", "30nM")
 
 pval.cutoff <- 0.001
 FC.cutoff <- log2(1.5)
@@ -158,16 +168,6 @@ FC.cutoff <- log2(1.5)
 
 experiment.proteinData <- fread(protein.data.path)
 
-### SPECIAL CODE BLOCK TO FIX SWAPPED SAMPLES
-experiment.proteinData  <- experiment.proteinData  %>%
-  mutate(GROUP = ifelse(originalRUN == "TT003478_NP02-03_repeat", "ARRB_NP10", GROUP)) %>%
-  mutate(GROUP = ifelse(originalRUN == "TT003479_NP02-04_repeat", "ARRB_NP01", GROUP)) %>%
-  mutate(GROUP = ifelse(originalRUN == "TT003480_NP02-05_repeat", "ARRB_NP05", GROUP)) %>%
-  # SUBJECT
-  mutate(SUBJECT = ifelse(originalRUN == "TT003478_NP02-03_repeat", "ARRB_NP10.1", SUBJECT)) %>%
-  mutate(SUBJECT = ifelse(originalRUN == "TT003479_NP02-04_repeat", "ARRB_NP01.1", SUBJECT)) %>%
-  mutate(SUBJECT = ifelse(originalRUN == "TT003480_NP02-05_repeat", "ARRB_NP05.1", SUBJECT))
-
 experiment.proteinData$RUN <- factor(experiment.proteinData$RUN)
 experiment.proteinData$Protein <- factor(experiment.proteinData$Protein)
 experiment.proteinData$GROUP <- factor(experiment.proteinData$GROUP)
@@ -179,13 +179,23 @@ experiment.proteinData$GROUP <- factor(experiment.proteinData$GROUP)
 The first thing you'll need to do is find some way to subset all of your proteomics data into all the individual series that you want to analyze into different parts of a list. I usually try to do this by matching a keyword that's contained in the GROUP name for the data belonging to each of my series using *grepl*. I use that below. You can always divide your data using other methods if that doesn't work for your particular dataset.
 ```{r}
 
+# First, split SUBJECT into 4 columns, cell.line, agonist.conc, timepoint, and replicate #
+# this makes splitting easier
+experiment.proteinData[, SUBJECT := gsub("\\.", "_", SUBJECT)]
+
+experiment.proteinData <- experiment.proteinData %>%
+  separate(SUBJECT, into = c("cell.line", "agonist.conc", "timepoint", "SUBJECT"), sep = "_", remove = TRUE) %>%
+    mutate(label = paste(`cell.line`, `timepoint`, sep = '_'))
+
 # Takes your full protein-level dataset and separates the data based on the series labels provided above by matching 
 # e.g. c("WT", "ARRB", "GRK") 
 
 PROTEIN.data <- lapply(series.labels, function(series.label) {
   
+  vehicle.term = paste(unlist(strsplit(series.label, "_"))[1], "vehicle", sep = "_")
+  
   subset <- experiment.proteinData %>%
-  filter(grepl(series.label, GROUP))
+  filter(grepl(series.label, label) | label == vehicle.term)
   
   return (subset)
   
@@ -219,18 +229,17 @@ I then take the series timepoint values and ordinally rank them.
 PROTEIN.data <- lapply(series.labels, function(series.label) {
   
   # Grab a each one of your targeted series
-  series.subset <- PROTEIN.data[[series.label]] %>%
-    filter(grepl(series.label, GROUP))
+  series.subset <- PROTEIN.data[[series.label]]
+
+  rank.order.label <- series.subset$cell.line[1]
   
-  # Substitute the period '.' with an underscore to make string splitting easier
-  series.subset[, SUBJECT := gsub("\\.", "_", SUBJECT)]
+  series.rank.order <- rank.order.lists[[rank.order.label]]
   
   # Take all the rows and split subject into Condition, Timepoint, and SUBJECT values
   # e.g. WT_NP00.1 eventually turns into three columns containing | WT | NP00 | 1 |
   series.subset <- series.subset %>%
-    separate(SUBJECT, into = c("Condition", "Timepoint", "SUBJECT"), sep = "_", remove = TRUE) %>%
     mutate(rankTime = -1) %>%
-    mutate(rankTime = match(Timepoint, series.rank.order) - 1)
+    mutate(rankTime = match(agonist.conc, series.rank.order) - 1)
   
   return (as.data.table(series.subset))
   
@@ -309,6 +318,10 @@ invisible(lapply(polyfit.names, function(polyfit.name) {
   
   target.proteins <- unique(regression.subset$Protein)
   
+  rank.order.label <- str_split(polyfit.name, "_")[[1]][1]
+  
+  series.rank.order <- rank.order.lists[[rank.order.label]]
+  
   lapply(target.proteins, function(protein) {
     
     #subset data
@@ -329,37 +342,37 @@ invisible(lapply(polyfit.names, function(polyfit.name) {
     # Factor by rankTime for plotting
     setorder(protein.specific.data, rankTime)
 
-    protein.specific.data[, Timepoint := factor(Timepoint, levels = series.rank.order)]
+    protein.specific.data[, agonist.conc := factor(agonist.conc, levels = series.rank.order)]
     
     # take regression.subset and extract the prediction curve
     regression.prediction <- melt(
       regression.polyfit.row, 
       measure.vars = grep("^prediction\\.", names(regression.polyfit.row), value = TRUE), 
-      variable.name = "Timepoint", 
+      variable.name = "agonist.conc", 
       value.name = "Prediction Abundance"
     )
-    regression.prediction <- regression.prediction[, c("Timepoint", "Prediction Abundance")]
-    regression.prediction$Timepoint <- series.rank.order
+    regression.prediction <- regression.prediction[, c("agonist.conc", "Prediction Abundance")]
+    regression.prediction$agonist.conc <- series.rank.order
     regression.prediction$`Prediction Abundance` <- regression.prediction$`Prediction Abundance` - vehicle.abundance
-    regression.prediction[, Timepoint := factor(Timepoint, levels = series.rank.order)]
+    regression.prediction[, agonist.conc := factor(agonist.conc, levels = series.rank.order)]
     regression.prediction$color <- "#323336"
     
     # Render plot.
-    p <- ggplot(protein.specific.data, aes(x = Timepoint, y = polyfit.intensity, color = SUBJECT)) +
+    p <- ggplot(protein.specific.data, aes(x = agonist.conc, y = polyfit.intensity, color = SUBJECT)) +
 
       # circles representing proteins
       geom_point(size = 3) +
       geom_path(
         data = regression.prediction, 
         group = 1, 
-        aes(x = Timepoint, y = `Prediction Abundance`),
+        aes(x = agonist.conc, y = `Prediction Abundance`),
         linetype = "dashed",
         color = "#323336",
         linewidth = 1, 
       ) +
       labs(
         title = paste0(gene.name, " - ", polyfit.name, " - Vehicle-normalized Agonist Regression"),
-        x = paste("Agonist Timepoint"),
+        x = paste("Agonist Concentration"),
         y = "Normalized Protein Log2 Fold-change"
       ) +
 
@@ -369,7 +382,7 @@ invisible(lapply(polyfit.names, function(polyfit.name) {
       scale_x_discrete() +
       theme_bw()
     
-    ggsave(paste0(paste(paste(data.name, "figures", sep = "_"), "Regressions", polyfit.name, gene.name, sep = "/"), " - Timeseries Regression.pdf"), plot = p, create.dir = TRUE)
+    ggsave(paste0(paste(paste(data.name, "figures", sep = "_"), "Regressions", polyfit.name, gene.name, sep = "/"), " - Anova Regression.pdf"), plot = p, create.dir = TRUE)
     
     print(p)
     
@@ -404,7 +417,7 @@ invisible(lapply(polyfit.names, function(polyfit.name) {
     geom_point(alpha = 0.8) +
     scale_color_manual(values = c(Not = "gray", Down = "#67a9cf", Up = "#ef8a62")) +
     ggrepel::geom_text_repel(data = thisDataset[Significance != "Not"], size = 2, max.overlaps = 20) +
-    labs(title = paste("NP02", polyfit.name, "Timepoint ANOVA", sep = " - "), x = paste("Protein - Maximum log2FC"), y = "-log10(p-value)") +
+    labs(title = paste("EB10", polyfit.name, "Abundance Concentration ANOVA", sep = " - "), x = paste("Protein - Maximum log2FC"), y = "-log10(p-value)") +
     
    # significance labels and lines
     # vertical lines
@@ -448,6 +461,74 @@ Save.Csv.With.Timestamp(PROTEIN.Combined.polyfits, "Protein Timeseries ANOVA.csv
 
 ```
 
+# Heatmap with Concentration-level data without labels
+
+```{r}
+
+# filter all proteins in group comparisons to having at least 1 significant changer in for each of our groups that is positive
+Filtered.Sites <- as.data.table(
+  PROTEIN.Combined.polyfits %>% 
+    group_by(Protein) %>% 
+    filter(any(pvalue <= pval.cutoff & log2FC >= FC.cutoff))
+)
+
+Filtered.Sites$Start.Value <- Filtered.Sites$actualWImputed.0
+
+Filtered.Sites <- Filtered.Sites %>%
+  pivot_longer(
+    cols = starts_with("actualWImputed"),
+    names_to = "Measurement",
+    values_to = "Log2FC"
+  )
+
+#rank.order.label <- str_split(polyfit.name, "_")[[1]][1]
+  
+#series.rank.order <- rank.order.lists[[rank.order.label]]
+  
+# Crossmap series rank order labels
+# Assume all timepoints are the same for ease.
+Filtered.Sites$Series.RankOrder <- gsub("actualWImputed\\.", "", Filtered.Sites$Measurement)
+Filtered.Sites$Series.RankOrder <- as.numeric(Filtered.Sites$Series.RankOrder)
+#Filtered.Sites$Series.RankOrder <- series.rank.order[Filtered.Sites$Series.RankOrder + 1]
+Filtered.Sites <- as.data.table(Filtered.Sites)
+Filtered.Sites$Log2FC <- Filtered.Sites$Log2FC - Filtered.Sites$Start.Value
+Filtered.Sites$col.label <- paste(Filtered.Sites$Knockout, Filtered.Sites$Series.RankOrder)
+
+Sig.Changing.Site.Matrix <- as.matrix(dcast(Filtered.Sites, gene.name ~ col.label, value.var = "Log2FC"), rownames = "gene.name")
+Sig.Changing.Site.Matrix[is.infinite(Sig.Changing.Site.Matrix)] <- 0
+Sig.Changing.Site.Matrix[is.na(Sig.Changing.Site.Matrix)] <- 0
+
+# Reorder columns to match concentration order
+# new_order <- c(5,1,3,4,2,15,11,13,14,12,10,8,6,7,9)
+# Sig.Changing.Site.Matrix <- Sig.Changing.Site.Matrix[, new_order]
+
+column_clusters <- rep(1:3, each = 18)
+
+pdf(paste(paste(data.name, "figures", sep = "_"), "Static HeatMap - Concentration Series ANOVA.pdf", sep = "/"))
+
+heatmap <- Heatmap(
+  Sig.Changing.Site.Matrix,
+  column_title = "EB10 - Abundance - Concentration Series ANOVA",
+  row_title = sprintf("%d Significantly Changing Proteins vs Vehicle", nrow(Sig.Changing.Site.Matrix)),
+  name = "Log2FC From Vehicle\n",
+  show_row_names = TRUE,
+  row_names_gp = gpar(fontsize = 8),
+  column_split = column_clusters,
+  cluster_columns = FALSE,
+  col = colorRamp2(c(-1.5, 0, 1.5), c("blue", "white", "red"))
+  #height = unit(5, "mm") * nrow(Sig.Changing.Site.Matrix), 
+  #width = unit(5, "mm") * ncol(Sig.Changing.Site.Matrix)
+  
+  #km = 4
+)
+
+drawnHeatmap <- draw(heatmap)
+
+
+dev.off() 
+
+```
+
 # Heatmap with Concentration-level data
 
 ```{r}
@@ -468,6 +549,10 @@ Filtered.Sites <- Filtered.Sites %>%
     values_to = "Log2FC"
   )
 
+#rank.order.label <- str_split(polyfit.name, "_")[[1]][1]
+  
+#series.rank.order <- rank.order.lists[[rank.order.label]]
+  
 # Crossmap series rank order labels
 # Assume all timepoints are the same for ease.
 Filtered.Sites$Series.RankOrder <- gsub("actualWImputed\\.", "", Filtered.Sites$Measurement)
@@ -481,16 +566,12 @@ Sig.Changing.Site.Matrix <- as.matrix(dcast(Filtered.Sites, gene.name ~ col.labe
 Sig.Changing.Site.Matrix[is.infinite(Sig.Changing.Site.Matrix)] <- 0
 Sig.Changing.Site.Matrix[is.na(Sig.Changing.Site.Matrix)] <- 0
 
-# Reorder columns to match concentration order
-# new_order <- c(5,1,3,4,2,15,11,13,14,12,10,8,6,7,9)
-# Sig.Changing.Site.Matrix <- Sig.Changing.Site.Matrix[, new_order]
-
-pdf(paste(paste(data.name, "figures", sep = "_"), "HeatMap - Series ANOVA.pdf", sep = "/"))
+pdf(paste(paste(data.name, "figures", sep = "_"), "HeatMap - Concentration Series ANOVA.pdf", sep = "/"))
 
 heatmap <- Heatmap(
   Sig.Changing.Site.Matrix,
-  column_title = "NP02 - Time Series ANOVA",
-  row_title = sprintf("%d Significantly Changing Proteins vs Timepoint 0", nrow(Sig.Changing.Site.Matrix)),
+  column_title = "EB10 - Abundance - Concentration Series ANOVA",
+  row_title = sprintf("%d Significantly Changing Proteins vs Vehicle", nrow(Sig.Changing.Site.Matrix)),
   name = "Log2FC From Timepoint 0\n",
   show_row_names = TRUE,
   row_names_gp = gpar(fontsize = 8),

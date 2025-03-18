@@ -137,7 +137,7 @@ map.gene.names <- function(protein.column, taxonomy.id = 9606) {
   unique.phosphosites <- unique(unlist(strsplit(as.character(protein.column), ";")))
   UniProt.IDs <- unique(sapply(unique.phosphosites, function(x) strsplit(x, "_")[[1]][1]))
   
-  UniProt.mapping <- select(UniProt.ws(taxId = 9606), # 10090 = mouse
+  UniProt.mapping <- AnnotationDbi::select(UniProt.ws(taxId = 9606), # 10090 = mouse
                        keys = UniProt.IDs,
                        columns = c("UniProtKB", "gene_primary"),
                        keytype = "UniProtKB")
