@@ -119,6 +119,7 @@ library(MSstatsConvert)
 
 # EnrichR Complex Heatmap Package
 library (ComplexHeatmap)
+library(clusterProfiler)
 
 # Krogan Lab Utility Functions- Load From GitHub
 utils <- "https://raw.githubusercontent.com/HuttenhainLab/bp_utils/master/"
@@ -144,6 +145,59 @@ map.gene.names <- function(protein.column, taxonomy.id = 9606) {
   
   # Create a named vector for fast lookup
   gene.name.map <- setNames(UniProt.mapping$Gene.Names..primary., UniProt.mapping$From)
+  
+  # Function to replace UniProt IDs with gene names
+  map_protein <- function(entry) {
+    # Split the entry by semicolons
+    
+    phosphosites <- unlist(strsplit(entry, ";"))
+    
+    # Replace UniProt IDs with gene names
+    mapped_sites <- sapply(phosphosites, function(site) {
+      # Split the site by underscore to separate UniProt ID and the rest
+      parts <- unlist(strsplit(site, "_"))
+      UniProtID <- parts[1]
+      
+      # Check if the UniProt ID has a mapped gene name
+      gene_name <- gene.name.map[UniProtID]
+      
+      # If a gene name is found, use it; otherwise, keep the UniProt ID
+      if (!is.na(gene_name)) {
+        # Recombine the gene name with the remaining part
+        paste(c(gene_name, parts[-1]), collapse = "_")
+      } else {
+        # If no mapping exists, return the original site
+        site
+      }
+    })
+    
+    # Rejoin the mapped sites with semicolons
+    paste(mapped_sites, collapse = ";")
+  }
+  
+  # Apply the mapping function to each row of the protein column
+  mapped_column <- sapply(as.character(protein.column), map_protein)
+  
+  return(mapped_column)
+}
+
+map.gene.names.clusterProfiler <- function(protein.column, protein.database.name = "org.Hs.eg.db") {
+  
+  unique.phosphosites <- unique(unlist(strsplit(as.character(protein.column), ";")))
+  UniProt.IDs <- unique(sapply(unique.phosphosites, function(x) strsplit(x, "_")[[1]][1]))
+    
+  # load in correct protein database
+  if (!requireNamespace(protein.database.name, quietly = TRUE)) {
+    stop(paste("Package", protein.database.name, "is not installed. Please install it using BiocManager::install()."))
+  }
+  
+  protein.database <- get(protein.database.name, envir = asNamespace(protein.database.name))
+  
+  # Convert UniProt IDs to gene symbols
+  mapping <- bitr(unique(UniProt.IDs), fromType="UNIPROT", toType="SYMBOL", OrgDb=protein.database)
+
+  # Create a named vector for fast lookup
+  gene.name.map <- setNames(mapping$SYMBOL, mapping$UNIPROT)
   
   # Function to replace UniProt IDs with gene names
   map_protein <- function(entry) {
@@ -404,6 +458,7 @@ global.proteinSummarization = MSstats::dataProcess(global.prepared,
 
 # Merge in protein names
 global.proteinSummarization$ProteinLevelData$gene.name <- map.gene.names(global.proteinSummarization$ProteinLevelData$Protein)
+#global.proteinSummarization$ProteinLevelData$gene.name <- map.gene.names.clusterProfiler(global.proteinSummarization$ProteinLevelData$Protein)
 
 # Write out data to CSVs
 Save.Csv.With.Timestamp(global.proteinSummarization$FeatureLevelData, "FeatureLevelData.csv", paste(data.name, "data", sep = "_"))
@@ -604,8 +659,9 @@ contrast.matrix <- Make.LFQ.Contrast.Matrix (input.data.frame = global.proteinSu
 
 global.pairwiseComparison <- MSstats::groupComparison(contrast.matrix, global.proteinSummarization)$ComparisonResult
 
-global.pairwiseComparison$gene.name <- map.gene.names(global.pairwiseComparison$Protein)
-  
+global.pairwiseComparison$gene.name <- map.gene.names.clusterProfiler(global.pairwiseComparison$Protein)
+#global.pairwiseComparison$gene.name <- map.gene.names.clusterProfiler(global.pairwiseComparison$Protein)
+
 Save.Csv.With.Timestamp(global.pairwiseComparison, "GroupComparisonsData.csv", paste(data.name, "data", sep = "_"))
 
 ```

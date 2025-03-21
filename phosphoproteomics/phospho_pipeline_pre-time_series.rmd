@@ -1,0 +1,535 @@
+---
+title: "phospho_pipeline_MsStatsPTM"
+author: "Dain Brademan"
+date: "2024-02-25"
+output: html_document
+---
+
+# Load Packages & Configure Project
+
+Now that in theory everything is installed. Let's load our packages. If you get any errors regarding **Package not found**, just go back and install it! A general rule is the fully lowercase libraries are from CRAN and the CamelCase libraries are from BioConductor
+
+```{r}
+# Load Packages
+library(devtools)
+library (data.table)
+
+library (magrittr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+library(R.utils) # Actually a cran package
+
+library(UniProt.ws)
+library(purrr)
+
+# plotting packages
+library (ggplot2)
+library(ggrepel)
+library(svglite)
+library (circlize)
+library(plotly)
+library (pbapply)
+rotate.x.axis.text <- theme(axis.text.x = element_text(angle = 90,vjust = 0.5, hjust=1))
+
+# MSstats Packages
+library(MSstats)
+library(MSstatsPTM)
+library(MSstatsConvert)
+
+# EnrichR Complex Heatmap Package
+library (ComplexHeatmap)
+
+# Krogan Lab Utility Functions
+utils <- "https://raw.githubusercontent.com/HuttenhainLab/bp_utils/master/"
+source(paste0(utils,"ManageScriptData.R"))
+source(paste0(utils, "enrichmentTestFunctions.R"))
+source (paste0(utils,"MSstats_V4_Functions.R"))
+source(paste0(utils,"KinaseActivityScores.R"))       
+
+# Dain Utility Functions
+drb_utils <- "https://raw.githubusercontent.com/HuttenhainLab/drb_utils/main/"
+source(paste0(drb_utils,"data_management.R"))
+source(paste0(drb_utils,"spectronaut_data_cleaning.R"))
+source(paste0(drb_utils,"gene_ontology_enrichment.R"))
+source(paste0(drb_utils,"phosphokinase_enrichment_analysis.R"))
+
+# Define functions to bind gene names to a data table based on UniProt ID column
+map.gene.names <- function(protein.column, taxonomy.id = 9606) {
+  unique.phosphosites <- unique(unlist(strsplit(as.character(protein.column), ";")))
+  UniProt.IDs <- unique(sapply(unique.phosphosites, function(x) strsplit(x, "_")[[1]][1]))
+  
+  UniProt.mapping <- AnnotationDbi::select(UniProt.ws(taxId = 9606), # 10090 = mouse
+                       keys = UniProt.IDs,
+                       columns = c("UniProtKB", "gene_primary"),
+                       keytype = "UniProtKB")
+  
+  # Create a named vector for fast lookup
+  gene.name.map <- setNames(UniProt.mapping$Gene.Names..primary., UniProt.mapping$From)
+  
+  # Function to replace UniProt IDs with gene names
+  map_protein <- function(entry) {
+    # Split the entry by semicolons
+    
+    phosphosites <- unlist(strsplit(entry, ";"))
+    
+    # Replace UniProt IDs with gene names
+    mapped_sites <- sapply(phosphosites, function(site) {
+      # Split the site by underscore to separate UniProt ID and the rest
+      parts <- unlist(strsplit(site, "_"))
+      UniProtID <- parts[1]
+      
+      # Check if the UniProt ID has a mapped gene name
+      gene_name <- gene.name.map[UniProtID]
+      
+      # If a gene name is found, use it; otherwise, keep the UniProt ID
+      if (!is.na(gene_name)) {
+        # Recombine the gene name with the remaining part
+        paste(c(gene_name, parts[-1]), collapse = "_")
+      } else {
+        # If no mapping exists, return the original site
+        site
+      }
+    })
+    
+    # Rejoin the mapped sites with semicolons
+    paste(mapped_sites, collapse = ";")
+  }
+  
+  # Apply the mapping function to each row of the protein column
+  mapped_column <- sapply(as.character(protein.column), map_protein)
+  
+  return(mapped_column)
+}
+
+```
+
+### Assign experiment-specific variables
+```{r}
+# Data Type
+# SP - Spectronaut
+# MQ - MaxQuant
+export.type <- "SP" 
+
+# Appended to all exported data/figures
+data.name <- "Example_LFQ"
+
+# create subdirectories to store intermediate tables and figures
+Create.Pipeline.Directories(data.name)
+
+# Pipeline considers samples with the same "Replicate/BioReplicate" column to be biological replicates i.e. from the same patient
+  # This is not true for a typical APEX experiment where we instead have technical replicates
+  # If `is.case.control` = TRUE, pipeline will make replicate column unique by concatenating Condition & Replicate columns
+  # If FALSE, pipeline will leave replicate columns as-is. 
+  # This will impact the statistical model either way.
+is.case.control = TRUE
+
+filter.ptm.score <- 0.75   # default 0.75, Class 1 Phosphopeptides.
+# filter.ptm.frequency <- 10 # The number of times a 
+
+# File paths to your mass spec data in either MaxQuant or Spectronaut format
+if (export.type == "SP") {
+  # Spectronaut specific parameters
+  # PUT THE PHOSPHO SPECTRONAUT EXPORT BELOW
+  spectronaut.phospho.report <- "../example_data/MSstatsPTM/example_spectronaut_phospho.tsv"
+  
+  # A self-built CSV which links file names to sample replicate and condition names
+  spectronaut.phospho.annotations <- "../example_data/MSstatsPTM/sample_annotations.csv"
+  
+  # The protein database that you searched against your mass spec data.
+  protein.database <- "../example_data/MSstatsPTM/Human_Canonical.fasta"
+  
+  # If you have abundance proteomics, specify it here. Otherwise leave it as an empty string "".
+  # PUT THE ABUNDANCE SPECTRONAUT EXPORT BELOW
+  #spectronaut.globalproteome.report <- "../example_data/MSstatsPTM/example_spectronaut_abundance.tsv"
+  spectronaut.globalproteome.report <- ""
+  
+} else if (export.type == "MQ") {
+  maxquant.evidence <- "../example_data/example_data_MQ_evidence.txt"
+  maxquant.proteingroups <- "../example_data/example_data_MQ_proteinGroups.txt"
+  maxquant.annotations <- "../example_data/example_data_MQ_annotations.csv"
+} else {
+  stop("Non-supported data type. Make sure data type is SP or MQ, otherwise pipeline will break.")
+}
+
+# Names of all possible contrasts will be generated from Condition names (formatted "ConditionName1-ConditionName2")
+  ## Example: regexContrasts <- c("Fsk-DMSO", "H2O2_Fsk-Fsk", "H2O2-DMSO", "H2O2_Fsk-H2O2")
+  ## This list should be strings that match your exact condition names that you entered in Spectronaut. 
+  ## You can also use RegEex terms if you know what you're doing, but I find it more exact to use full condition names to avoid accidental     RegEx matches
+
+global.regexContrasts <- c()
+
+
+# Sometimes you want to remove certain runs because they're bad, or before data normalization. 
+# You can also do this at the condition level for ease, but you'll need to modify the code in the post-normalization section to do this
+# Specify the runs here. 
+runs.to.remove <- c()
+# Uncomment the below line to remove the "control" samples before median normalization
+# runs.to.remove <- c("TT000243_AM04-01","TT000244_AM04-02","TT000245_AM04-03","TT000246_AM04-04","TT000247_AM04-05","TT000254_AM04-12","TT000255_AM04-13","TT000256_AM04-14","TT000257_AM04-15","TT000258_AM04-16")
+
+```
+
+
+# Import Data
+```{r}
+# Spectronaut specific data files
+if (export.type == "SP") {
+  spectronaut.phospho.report <- fread(spectronaut.phospho.report)
+  
+  if (spectronaut.globalproteome.report != "") {
+    spectronaut.globalproteome.report <- fread(spectronaut.globalproteome.report)
+  }
+  
+# MaxQuant specific data files
+} else if (export.type == "MQ") {
+  maxquant.evidence <- fread(maxquant.evidence)
+  maxquant.proteingroups <- fread(maxquant.proteingroups)
+  maxquant.annotations <- fread(maxquant.annotations)
+}
+```
+
+# Clean raw data
+
+### Remove Contaminant Peptides
+It's recommended to include commonly observed contaminant proteins when processing your proteomic datasets. However, Spectronaut does not remove these entries for you. Fortunately, all contaminant protein accessions are prepended with the text **Cont\_** so we can go through each row in our dataset and toss that data ourselves.
+```{r}
+if (export.type == "SP") {
+  # remove all contaminant proteins.
+  spectronaut.phospho.report  <- spectronaut.phospho.report  %>%
+    filter(!grepl("Cont_|NaN|TRYP_PIG", PG.ProteinGroups))
+  
+  if (spectronaut.globalproteome.report != "") {
+    spectronaut.globalproteome.report<- spectronaut.globalproteome.report %>%
+    filter(!grepl("Cont_|NaN|TRYP_PIG", PG.ProteinGroups))
+  }
+}
+```
+
+# Remove low-scoring phospho hits.
+When a phosphopeptide is identified, there is a localization score reported for the probability that the reported site is correct. This localization probability can be broken down into several classes:
+ -    Class I, localization prob ≥ 0.75
+ -    Class II, localization prob ≥ 0.50
+ -    Class III, localization prob ≥ 0.25
+ 
+It is common to filter phospho hits to just Class I entries when doing biological followup, which we will do here. 
+```{r}
+if (export.type == "SP") {
+  phospho.string <- c("Phospho \\(STY\\)")
+  
+  spectronaut.phospho.report <- Spectronaut_FilterPTMs(spectronaut.phospho.report, 
+                                                       retain.unmodified.peptides = FALSE,
+                                                       ptm.strings = phospho.string,        # c("Phospho \\(STY\\)")
+                                                       filter.ptm.score = filter.ptm.score, # 0.75 from above
+                                                       filter.ptm.frequency = 1
+                                                       )
+  rm (phospho.string)
+}
+
+```
+
+
+### Do MsStatsPTM Preprocessing
+```{r}
+if (is.data.table(spectronaut.globalproteome.report)) {
+  
+  # Do preprocessing using separate global proteomics dataset to adjust phospho abundance
+  experiment.converted.data <- SpectronauttoMSstatsPTMFormat(
+                                                  input = spectronaut.phospho.report,
+                                                  annotation = spectronaut.phospho.annotations,
+                                                  fasta_path = protein.database,
+                                                  protein_input =  spectronaut.globalproteome.report,
+                                                  mod_id = "\\[Phospho \\(STY\\)\\]")
+  
+  
+  Save.Csv.With.Timestamp(experiment.converted.data$PROTEIN, "Cleaned_Raw_Data_PROTEIN.csv", paste(data.name, "data", sep = "_"))
+  Save.Csv.With.Timestamp(experiment.converted.data$PTM, "Cleaned_Raw_Data_PTM.csv", paste(data.name, "data", sep = "_"))
+  
+  rm(spectronaut.globalproteome.report)
+  rm(spectronaut.phospho.report)
+  
+} else {
+   
+  # Do preprocessing just with phospho output
+  experiment.converted.data <- SpectronauttoMSstatsPTMFormat(spectronaut.phospho.report,
+                                                 annotation = spectronaut.phospho.annotations,
+                                                 fasta_path = protein.database,
+                                                 use_unmod_peptides = FALSE,
+                                                 mod_id = "\\[Phospho \\(STY\\)\\]")
+  
+  Save.Csv.With.Timestamp(experiment.converted.data$PTM, "Cleaned_Raw_Data_PTM.csv", paste(data.name, "data", sep = "_"))
+  
+  rm(spectronaut.phospho.report)
+}
+
+```
+
+
+# Quality Control Plots of the Raw Data
+
+Now is a good time to take a look at the raw data.
+
+### View a distribution of the peptide ion transitions.
+
+This should be monomodal after the *SpectronauttoMSstatsFormat* filtering step
+
+```{r}
+
+ggplot(experiment.converted.data$PTM, aes(x=log10(Intensity))) +
+  geom_histogram(binwidth = 0.05, fill = "gray", color = "black", alpha = 0.7) +
+  labs(title = "Histogram of Peptide Transition Intensities", x = "Log10(Intensity)", y = "Frequences") +
+  theme_bw()
+
+ggsave(paste(paste(data.name, "figures", sep = "_"), "Histogram - PTM Transition Intensities.pdf", sep = "/"))
+
+```
+
+### Count unique peptide sequences per experimental condition
+
+For a general abundance proteomics APEX experiment, we would hope for 70,000+ peptide sequences per replicate. This particular dataset is lower than that due to various reasons, but what we are looking for are consistent numbers across related replicates and the APEX samples. APEX control samples (no construct or no biotin so no enrichment) hopefully will be lower.
+
+```{r}
+unique_counts <- as.data.table(experiment.converted.data$PTM) %>%
+  filter(!is.na(Intensity)) %>%
+  filter(Intensity != 0) %>%
+  group_by(Condition, BioReplicate) %>%
+  summarize(Unique_Peptide_Count = n_distinct(PeptideSequence))
+
+ggplot(unique_counts, aes(x = BioReplicate, y = Unique_Peptide_Count, fill = Condition)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = Unique_Peptide_Count), vjust = -0.5, color = "black", size = 3) +
+  labs(title = "Unique PTMs per Replicate",
+       x = "Replicate",
+       y = "Number of PTMs per Replicate") +
+  theme_bw() +
+  rotate.x.axis.text
+
+ggsave(paste(paste(data.name, "figures", sep = "_"), "Histogram - PTMs per Sample.pdf", sep = "/"))
+```
+
+### Get boxplot of quantitative values per sample
+
+Just the same as the number of peptide sequences, we also expect related samples to have similar quantitative distributions. The APEX experimental workflow involved biotin labeling of proximal proteins and subsequent enrichment. As the control samples were not designed to undergo biotin labeling, the control samples ideally will have *lower* intensity distributions than the APEX samples.
+
+```{r}
+
+ggplot(data = experiment.converted.data$PTM, aes (x = BioReplicate,
+                                                  y = log10(Intensity),
+                                                  fill = Condition)) +
+  # Simpler boxplots for clarity
+  geom_boxplot() +
+  
+  # Violin plots if you want to be fancy
+  #geom_violin() +
+  #geom_boxplot(width = 0.1, fill = "lightgray") +
+  labs(title = "PTM Transition Intensities per Sample",
+       x = "Sample",
+       y = "Log10 Transition Intensity") +
+  rotate.x.axis.text
+
+ggsave(paste(paste(data.name, "figures", sep = "_"), "PTM Transition Intensities per Sample.pdf", sep = "/"))
+
+```
+
+
+
+
+### Do MsStatsPTM summarization to proteins
+```{r}
+experiment.converted.data$PROTEIN <- NULL
+
+experiment.dataProcessed = dataSummarizationPTM(experiment.converted.data, 
+                                          verbose = FALSE, 
+                                          use_log_file = FALSE, 
+                                          append = FALSE)
+
+
+if(!is.null(experiment.dataProcessed$PROTEIN)) {
+  
+  experiment.dataProcessed$PROTEIN$FeatureLevelData$gene.name <- map.gene.names(experiment.dataProcessed$PROTEIN$FeatureLevelData$Protein)
+  experiment.dataProcessed$PROTEIN$FeatureLevelData$gene.name <- map.gene.names(experiment.dataProcessed$PROTEIN$ProteinLevelData$Protein)
+  
+  Save.Csv.With.Timestamp(experiment.dataProcessed$PROTEIN$FeatureLevelData, "PROTEIN_FeatureLevelData.csv", paste(data.name, "data", sep = "_"))
+  Save.Csv.With.Timestamp(experiment.dataProcessed$PROTEIN$ProteinLevelData, "PROTEIN_ProteinLevelData.csv", paste(data.name, "data", sep = "_"))
+  
+}
+
+experiment.dataProcessed$PTM$FeatureLevelData$gene.name <- map.gene.names(experiment.dataProcessed$PTM$FeatureLevelData$Protein)
+experiment.dataProcessed$PTM$FeatureLevelData$gene.name <- map.gene.names(experiment.dataProcessed$PTM$ProteinLevelData$Protein)
+  
+Save.Csv.With.Timestamp(experiment.dataProcessed$PTM$FeatureLevelData, "PTM_FeatureLevelData.csv", paste(data.name, "data", sep = "_"))
+Save.Csv.With.Timestamp(experiment.dataProcessed$PTM$ProteinLevelData, "PTM_ProteinLevelData.csv", paste(data.name, "data", sep = "_"))
+
+rm(experiment.converted.data)
+
+```
+
+
+# (Optional) Reload DataProcess results
+
+If you ever want to go back & reanalyze data after the data process function, it can be frustrating to have to run through the entire pipeline again up to this point. 
+
+Your dataset may not have all the components below. If you're missing PROTEIN / ADJUSTED data, just delete those elements
+```{r}
+
+experiment.dataProcessed <- list()
+
+##################################################################################################################################################
+# Import PROTEIN data ############################################################################################################################
+##################################################################################################################################################
+
+experiment.dataProcessed$PROTEIN = list( 
+  ProteinLevelData = NULL,
+  FeatureLevelData = NULL
+)
+
+experiment.dataProcessed$PROTEIN$ProteinLevelData <- fread(paste0(paste(data.name, "data/", sep = "_"), "20240227_PROTEIN_ProteinLevelData.csv"))
+experiment.dataProcessed$PROTEIN$FeatureLevelData <- fread(paste0(paste(data.name, "data/", sep = "_"), "20240227_PROTEIN_FeatureLevelData.csv"))
+
+experiment.dataProcessed$PROTEIN$ProteinLevelData$RUN <- factor(experiment.dataProcessed$PROTEIN$ProteinLevelData$RUN)
+experiment.dataProcessed$PROTEIN$ProteinLevelData$Protein <- factor(experiment.dataProcessed$PROTEIN$ProteinLevelData$Protein)
+experiment.dataProcessed$PROTEIN$ProteinLevelData$GROUP <- factor(experiment.dataProcessed$PROTEIN$ProteinLevelData$GROUP)
+
+
+##################################################################################################################################################
+# Import PTM data ################################################################################################################################
+##################################################################################################################################################
+
+experiment.dataProcessed$PTM = list( 
+  ProteinLevelData = NULL,
+  FeatureLevelData = NULL
+)
+
+experiment.dataProcessed$PTM$ProteinLevelData <- fread(paste0(paste(data.name, "data/", sep = "_"), "20240227_PTM_ProteinLevelData.csv"))
+experiment.dataProcessed$PTM$FeatureLevelData <- fread(paste0(paste(data.name, "data/", sep = "_"), "20240227_PTM_FeatureLevelData.csv"))
+
+experiment.dataProcessed$PTM$ProteinLevelData$RUN <- factor(experiment.dataProcessed$PTM$ProteinLevelData$RUN)
+experiment.dataProcessed$PTM$ProteinLevelData$Protein <- factor(experiment.dataProcessed$PTM$ProteinLevelData$Protein)
+experiment.dataProcessed$PTM$ProteinLevelData$GROUP <- factor(experiment.dataProcessed$PTM$ProteinLevelData$GROUP)
+
+```
+
+# Do Principal Component Analysis
+look to see if there are serious batch effects, outlying samples, etc.
+```{r}
+
+# Go from long to wide format
+# Row names are protein groups
+# Columns are each sample's LogIntensity values for each protein
+intensity.matrix <- as.matrix(dcast(as.data.table(experiment.dataProcessed$PTM$ProteinLevelData), Protein ~ SUBJECT, value.var = "LogIntensities"),
+                           rownames = "Protein")
+
+complete.data.matrix <- intensity.matrix[complete.cases(intensity.matrix),]
+
+# Do PCA
+pcaOut <- prcomp(t(complete.data.matrix))
+
+# Reshape from matrix to data table
+pcaDT <- as.data.table(pcaOut$x, keep.rownames=TRUE)
+
+# Add column named `mainGroup`. 
+# This value is derived from the rowname by splitting on '_' and grabbing the first element
+pcaDT[, Condition := tstrsplit(rn, "\\.")[[1]]] #transpose & split
+
+# Add column named `batch`. 
+# This value is derived from the rowname by splitting on '_' and grabbing the first element
+pcaDT[, Batch := sapply(strsplit(rn, "\\."), function(x) tail(x, 1))] #transpose & split
+
+pcaPercentVar <- round(100 * (pcaOut$sdev^2)/sum(pcaOut$sdev^2), 1)
+
+# Visualize PC1 and PC2, color data points by batch value.
+# You can also color data points by mainGroup or other factors that you scrape out above.
+p <- ggplot (pcaDT, aes(x=PC1, y=PC2, color = Condition )) + 
+  geom_point(alpha=1.0, size=4) + 
+  ggrepel::geom_text_repel(aes(label=rn), show.legend = FALSE, size = 3) +
+  theme_bw() + 
+  xlab (sprintf ("PC1, %.1f%%", pcaPercentVar[1])) + 
+  ylab (sprintf ("PC2, %.1f%%", pcaPercentVar[2])) + 
+  ggtitle (sprintf ("PCA using %d Proteins (log intensity)", nrow(complete.data.matrix))) 
+p
+
+# Optionally save the figure
+ggsave(paste(paste(data.name, "figures", sep = "_"), "Principal Component Analysis - Condition.pdf", sep = "/"))
+
+```
+
+# Plot PTM intensities
+
+All of our peptide-level data has now been summarized into protein groups. Let's inspect the intensity distributions of this data. Note: the data process function already log2 transformed this data, so we don't have to ourselves.
+
+```{r}
+
+ggplot (experiment.dataProcessed$PTM$ProteinLevelData, 
+        aes (x = interaction (SUBJECT), 
+             y = LogIntensities, 
+             fill = GROUP)
+        ) + 
+  # Simpler boxplots for clarity
+  geom_boxplot() +
+  
+  # Violin plots if you want to be fancy
+  #geom_violin() +
+  #geom_boxplot(width = 0.1, fill = "lightgray") +
+  labs(title = "PTM Abundance Distributions",
+       x = "Replicate",
+       y = "Log2 PTM Abundances") +
+  rotate.x.axis.text
+
+ggsave(paste(paste(data.name, "figures", sep = "_"), "PTM Abundances per Sample.pdf", sep = "/"))
+
+```
+
+
+```{r}
+
+unique_counts <- experiment.dataProcessed$PTM$ProteinLevelData %>%
+  filter(LogIntensities != 0) %>%
+  filter(!is.na(LogIntensities)) %>%
+  filter(!is.infinite(LogIntensities)) %>%
+  group_by(GROUP) %>%
+  summarize(Unique_Protein_Count = n_distinct(Protein))
+
+ggplot(unique_counts, aes(x = GROUP, y = Unique_Protein_Count, fill = GROUP)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = Unique_Protein_Count), vjust = -0.5, color = "black", size = 3) +
+  labs(title = "Count of PTMs per Condition",
+       x = "Condition",
+       y = "Number of PTMs") +
+  rotate.x.axis.text
+
+ggsave(paste(paste(data.name, "figures", sep = "_"), "Histogram - PTMs Per Condition.pdf", sep = "/"))
+```
+
+# Plot average protein CVs per condition
+
+```{r}
+
+proteomics_data <- experiment.dataProcessed$PTM$ProteinLevelData %>%
+  group_by(GROUP, Protein) %>%
+  summarize(CV = sd(LogIntensities) / mean(LogIntensities) * 100)
+
+mean_cv_data <- proteomics_data %>%
+  group_by(GROUP) %>%
+  filter(CV >= 0) %>%
+  summarize(mean_CV = median(CV, na.rm = TRUE))
+
+# Plot the distribution of CV for each group
+ggplot(proteomics_data, aes(x = GROUP, y = CV, fill = GROUP)) +
+
+  geom_boxplot() +
+  labs(title = "PTM Coefficient of Variation Distributions by Group",
+       x = "Please note CV's were calculated in Log2 space, not raw intensities",
+       y = "Coefficient of Variation (%)") +
+  
+  geom_text(data = mean_cv_data, aes(x = GROUP, y = -5, label = round(mean_CV, 2)),
+            color = "black", vjust = 1) +
+  ylim(-5, 100) +
+  
+  theme_bw() +
+  rotate.x.axis.text
+
+ggsave(paste(paste(data.name, "figures", sep = "_"), "PTM CVs per Condition.pdf", sep = "/"))
+
+```
+
+After this point, if you have longitudinal data you'll want to redirect to the ANOVA pipeline 
