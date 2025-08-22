@@ -228,6 +228,15 @@ if (export.type == "SP") {
 
 ```
 
+### Make Replicate column unique if set
+
+This prevents MSstats from treating experimental/technical replicates as bioreplicates. Bioreplicates are modeled differently within the statistical framework.
+
+```{r}
+if (is.case.control) {
+  spectronaut.lfq.report$R.Replicate <- paste(spectronaut.lfq.report$R.Condition, spectronaut.lfq.report$R.Replicate, sep = ".")
+}
+```
 
 ### Do MsStatsPTM Preprocessing
 ```{r}
