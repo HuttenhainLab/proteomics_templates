@@ -31,7 +31,7 @@ This pipeline supports proteomics data searched using Spectronaut or MaxQuant. U
 
 -   Maxquant Evidence File (.txt)
 
--   Maxquant Protein Groups File  (.txt)
+-   Maxquant Protein Groups File (.txt)
 
 -   Maxquant Annotations File (manually built)
 
@@ -112,6 +112,7 @@ library(purrr)
 # Plotting packages
 library (ggplot2)
 library(ggrepel)
+library(circlize)
 rotate.x.axis.text <- theme(axis.text.x = element_text(angle = 90,vjust = 0.5, hjust=1))
 
 # MSstats Packages
@@ -279,13 +280,7 @@ if (export.type == "SP") {
 
 global.regexContrasts <- c(
   # 0 minute APEX vs no biotinylation control
-  "0m_40-ctrl_40", "0m_50-ctrl_50", "0m_60-ctrl_60", "0m_70-ctrl_70", "0m_80-ctrl_80",
-  
-  # 5 minute APEX vs no biotinylation control
-  "5m_40-ctrl_40", "5m_50-ctrl_50", "5m_60-ctrl_60", "5m_70-ctrl_70", "5m_80-ctrl_80",
-  
-  # 5 minute APEX vs 0 minute APEX                          
-  "5m_40-0m_40", "5m_50-0m_50", "5m_60-0m_60", "5m_70-0m_70", "5m_80-0m_80"
+  "0m_40-ctrl_40", "0m_80-ctrl_80"
 )
 
 
@@ -300,6 +295,7 @@ runs.to.remove <- c()
 # Import Data
 
 This reads the proteomics search engine data verbatim and loads it into a data frame. You can see this data frame in the environment window. (default location: upper left)
+
 ```{r}
 
 # Spectronaut specific data files
@@ -312,11 +308,12 @@ if (export.type == "SP") {
   maxquant.proteingroups <- fread(maxquant.proteingroups)
   maxquant.annotations <- fread(maxquant.annotations)
 }
+
 ```
 
 ### Clean data
 
-It's recommended to include commonly observed contaminant proteins when processing your proteomic datasets. However, Spectronaut does not remove these entries for you. Fortunately, all contaminant protein accessions are prepended with the text **Cont\_** so we can go through each row in our dataset and toss that data ourselves.
+It's recommended to include commonly observed contaminant proteins when processing your proteomic datasets. However, Spectronaut does not automatically filter these entries for you. Fortunately, all contaminant protein accessions are prepended with the text **Cont\_** so we can go through each row in our dataset and toss those data ourselves.
 
 ```{r}
 if (export.type == "SP") {
@@ -326,7 +323,7 @@ if (export.type == "SP") {
 }
 ```
 
-### Make Replicate column unique if set
+### Make Replicate column unique for each experimental condition
 
 This prevents MSstats from treating experimental/technical replicates as bioreplicates. Bioreplicates are modeled differently within the statistical framework.
 
@@ -346,12 +343,15 @@ After this stage, we will no longer need to write special code to handle Spectro
 if (export.type == "SP") {
   
   # the optional arguments are recommended in the msStats user guide. Feel free to change if you know better.
-  global.prepared <- SpectronauttoMSstatsFormat(spectronaut.lfq.report,
+  global.prepared <- suppressWarnings({
+      SpectronauttoMSstatsFormat(spectronaut.lfq.report,
                                        filter_with_Qvalue = TRUE, ## same as default
                                        qvalue_cutoff = 0.01, ## same as default
                                        removeProtein_with1Feature = FALSE,
-                                       use_log_file = FALSE
+                                       use_log_file = FALSE,
+                                       verbose = FALSE
                                        )
+      })
   
   rm(spectronaut.lfq.report)
   
@@ -365,15 +365,6 @@ if (export.type == "SP") {
   
   rm(maxquant.evidence, maxquant.annotations, maxquant.proteingroups)
 }
-
-```
-
-### Remove any unwanted runs
-
-This tosses any files listed in the *runs.to.remove* vector. I use this block of code to toss all my control samples before median normalization. 
-```{r}
-# Tosses any rows where the 'Run' column matches a value in the 'runs.to.remove' vector listed at the top
-global.prepared <- global.prepared[!(global.prepared$Run %in% runs.to.remove), ]
 
 ```
 
@@ -439,7 +430,17 @@ ggplot(data = global.prepared, aes (x = BioReplicate,
        y = "Log10 Transition Intensity") +
   rotate.x.axis.text
 
-ggsave(paste(paste(data.name, "figures", sep = "_"), "Peptide Transition Intensities per Sample.pdf", sep = "/"))
+ggsave(paste(paste(data.name, "figures", sep = "_"), "Boxplot - Peptide Transition Intensities.pdf", sep = "/"))
+
+```
+
+### Remove any unwanted runs
+
+You'll frequently want to remove certain samples or conditions from your dataset before summarizing to the protein level. There are many ways of doing this. I usually do this by matching certain text in the **BioReplicate** or **Condition** columns. The below chunk tosses any files listed in a vector named *runs.to.remove*, but you could also use the dplyr filter function.
+
+```{r}
+# Tosses any rows where the 'Run' column matches a value in the 'runs.to.remove' vector listed at the top
+global.prepared <- global.prepared[!(global.prepared$Run %in% runs.to.remove), ]
 
 ```
 
@@ -455,7 +456,8 @@ global.proteinSummarization = MSstats::dataProcess(global.prepared,
                                summaryMethod="TMP",
                                censoredInt='NA',				
                                MBimpute=FALSE,				
-                               maxQuantileforCensored=0.999)
+                               maxQuantileforCensored=0.999,
+                               verbose = FALSE)
 
 # Merge in protein names
 global.proteinSummarization$ProteinLevelData$gene.name <- map.gene.names(global.proteinSummarization$ProteinLevelData$Protein)
@@ -483,7 +485,9 @@ If you ever want to go back & reanalyze data after the data process function, it
 ```
 
 # Do Principal Component Analysis
+
 look to see if there are serious batch effects, outlying samples, etc.
+
 ```{r}
 
 # Go from long to wide format
@@ -604,47 +608,6 @@ ggsave(paste(paste(data.name, "figures", sep = "_"), "Protein CVs per Condition.
 
 ```
 
-# Native Carboxylase Enrichment
-
-This is a quality control plot I borrowed from Ben Polacco.If you've normalized your data, it's useful. Without normalization the results are pretty difficult to interpret.
-
-*APEX works by labeling neighboring/interacting proteins with biotin which is then used to purify labeled proteins. There are also proteins that are endogenously biotinylated which will co-purify with the APEX-labeled proteins. Here we look at a subset of these endogenous biotin proteins, and we inspect their post-normalization background levels, which are inversely related to the labeling-efficiency of APEX. More background after normalization implies there is less APEX-labeled signal.*
-
-If you see your control conditions at higher abundance compared to the rest of your samples, great, APEX labeling and enrichment is behaving as we expected!
-
-```{r}
-
-biotin.carboxylases.up <- c("O00763","P05165","P11498","Q13085","Q96RQ3")
-
-native.biotin.data <- as.data.table(global.proteinSummarization$ProteinLevelData)
-native.biotin.data <- native.biotin.data[grepl(paste(biotin.carboxylases.up, collapse = "|"), native.biotin.data$Protein), ]
-
-
-# Plotting code
-ggplot(native.biotin.data, aes(x = Protein, y = LogIntensities, fill = GROUP)) +
-  stat_summary(
-    fun.data = mean_sdl,
-    fun.args = list(mult = 1),
-    geom = "bar",
-    position = position_dodge(width = 0.8),  # Adjust the width as needed
-    width = 0.6  # Adjust the width of bars
-  ) +
-  stat_summary(
-    fun.data = mean_sdl,
-    fun.args = list(mult = 1),
-    geom = "errorbar",
-    position = position_dodge(width = 0.8),
-    width = 0.4  # Adjust the width of error bars
-  ) +
-  labs(title = "Mean Log Intensities with Standard Deviation by GROUP",
-       x = "GROUP", y = "Log Intensities") +
-  theme_bw()
-
-ggsave(paste(paste(data.name, "figures", sep = "_"), "NativeCarboxylases.pdf", sep = "/"))
-
-rm(biotin.carboxylases.up, test)
-```
-
 # Do global pairwise comparisons to check for successful APEX enrichment
 
 Another way you can check for successful APEX enrichment is to make volcano plots comparing protein abundances between non-BP vs BP conditions. What you should see is a mass up-regulation of most proteins. If you don't see that, your enrichment likely didn't work, or you have a ton of background binding. To make these comparisons, we can use the GroupComparison function from msStats. To use this function, you need the output from MSstats::DataProcess, and you also have to build a contrast matrix, essentially a numerical vector indicating what experimental conditions you want to compare.
@@ -673,14 +636,16 @@ Do all the volcano plots for all experiment contrasts
 
 ```{r}
 
+pvalue.threshold <- 0.05
+log2FC.threshold <- 1
+  
 # This is essentially a foreach loop. 
 # Takes each of the labels of the above pairwise comparison
 # Subselects that specific data
 # Finally, makes the volcano plot
 lapply(global.regexContrasts, function(comparison) {
   
-  pvalue.threshold <- 0.05
-  log2FC.threshold <- 1 # Ruth likes log2(1.5)
+   # Ruth likes log2(1.5)
   
   # define significant proteins
   thisPairwiseComparison <- as.data.table(global.pairwiseComparison %>% filter(Label == comparison))
@@ -721,4 +686,94 @@ lapply(global.regexContrasts, function(comparison) {
   ggsave(paste(paste(data.name, "figures", sep = "_"), paste("Protein - Volcano - ", comparison, ".pdf", sep = ""), sep = "/"))
 })
 
+```
+
+```{r}
+# filter all proteins in group comparisons to having at least 1 significant changer in for each of our groups that is positive
+Filtered.Sites <- as.data.table(
+  global.pairwiseComparison %>% 
+    group_by(Protein) %>% 
+    filter(any(pvalue <= pvalue.threshold & abs(log2FC) >= log2FC.threshold)))
+
+Sig.Changing.Site.Matrix <- as.matrix(dcast(Filtered.Sites, gene.name ~ Label, value.var = "log2FC"), rownames = "gene.name")
+Sig.Changing.Site.Matrix[is.infinite(Sig.Changing.Site.Matrix)] <- 0
+Sig.Changing.Site.Matrix[is.na(Sig.Changing.Site.Matrix)] <- 0
+
+
+pdf("HeatMap.pdf")
+
+# Get maximum magnitude Log2FC for heatmap
+log2fc.magnitude <- global.pairwiseComparison %>%
+  filter(is.finite(log2FC)) %>% 
+  summarise(max_abs = max(abs(log2FC), na.rm = TRUE)) %>%
+  pull(max_abs)
+
+log2fc.magnitude <- round(log2fc.magnitude)
+
+# Center at 0
+heatmap.colorscale <- colorRamp2(
+  breaks = seq(-log2fc.magnitude, log2fc.magnitude, by = 1),
+  colors = colorRampPalette(c("blue", "#EEEEEE", "red"))(length(seq(-log2fc.magnitude, log2fc.magnitude, by = 1)))
+)
+
+heatmap <- Heatmap(
+  Sig.Changing.Site.Matrix,
+  column_title = "Example Heatmap",
+  row_title = sprintf("%d significantly changing phosphosites vs control", nrow(Sig.Changing.Site.Matrix)),
+  name = "Log2 fold change from control\n",
+  col = heatmap.colorscale,
+  show_row_names = FALSE,
+  row_names_gp = gpar(fontsize = 8),
+  cluster_columns = TRUE,
+  heatmap_legend_param = list(
+    at = seq(-log2fc.magnitude, log2fc.magnitude, by = 1),
+    labels = seq(-log2fc.magnitude, log2fc.magnitude, by = 1)
+  )
+)
+
+drawnHeatmap <- draw(heatmap)
+
+grid::grid.text(
+  #"Significance Thresholds: * p < 0.05; ** p < 0.01; *** p < 0.001;", 
+  "Significance defined as pvalue < 0.05 and log2FC > 1",
+  y = unit(0.03, "npc"), 
+  gp = gpar(fontsize = 8),
+  just = "center"
+)
+
+dev.off()
+
+```
+# GO Enrichment
+
+```{r}
+# only want to load these terms once. It takes a bit to run
+#global.go.terms <- Load.GO.Terms.From.Bioconductor(database.name = "org.Hs.eg.db", ontology.type = "CC")
+
+# This is all the proteins in your dataset.
+dataset.all.proteins <- unique(as.character(global.pairwiseComparison$Protein))
+
+# get indices of clusters of interest based on dendrogram
+beads40.proteins <- (global.pairwiseComparison %>%
+  filter(pvalue <= 0.05 & abs(log2FC) >= 1 & Label == "0m_40-ctrl_40"))$Protein
+
+beads80.proteins <- (global.pairwiseComparison %>%
+  filter(pvalue <= 0.05 & abs(log2FC) >= 1 & Label == "0m_80-ctrl_80"))$Protein
+
+cluster.list <- list(Beads40 = beads40.proteins, Beads80 = beads80.proteins )
+
+enrichment.list <- lapply (cluster.list, function(cluster.proteins){
+                        setDT(as.data.table(clusterProfiler::enricher(gene = cluster.proteins, 
+                                                                      universe = dataset.all.proteins, 
+                                                                      TERM2GENE = global.go.terms,
+                                                                      pAdjustMethod = "fdr",
+                                                                      pvalueCutoff = 0.05)))
+                       })
+
+
+#source(paste0(drb_utils,"gene_ontology_enrichment.R"))
+cluster.enrichment.table <- rbindlist(enrichment.list, idcol = "Cluster")
+perm.cluster.enrich.tab <- cluster.enrichment.table
+
+enrichHeatmapBestPerGroup(cluster.enrichment.table, NULL, groupColumn = "Cluster", topN = 10)  # compare enrichment in the top 10 terms per group
 ```
