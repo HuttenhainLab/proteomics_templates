@@ -75,7 +75,8 @@ Then you can install all the BioConductor packages you want! Note, you may be pr
 
 ```{r}
 # Install a specific version of BioConductor core packages
-# Don't use this unless you know what you're doing...<BiocManager::install(version = "3.18)>
+# Only do this if you need a specific release.
+# <BiocManager::install(version = "3.18)>
 
 # Install latest version of BioConductor core packages
 # BiocManager::install()
