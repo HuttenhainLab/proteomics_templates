@@ -136,50 +136,94 @@ source(paste0(drb_utils,"spectronaut_data_cleaning.R"))
 source(paste0(drb_utils,"gene_ontology_enrichment.R"))
 
 # Define functions to bind gene names to a data table based on UniProt ID column
-map.gene.names <- function(protein.column, taxonomy.id = 9606) {
-  unique.phosphosites <- unique(unlist(strsplit(as.character(protein.column), ";")))
-  UniProt.IDs <- unique(sapply(unique.phosphosites, function(x) strsplit(x, "_")[[1]][1]))
-  
-  UniProt.mapping <- AnnotationDbi::select(UniProt.ws(taxId = 9606), # 10090 = mouse
-                       keys = UniProt.IDs,
-                       columns = c("UniProtKB", "gene_primary"),
-                       keytype = "UniProtKB")
-  
-  # Create a named vector for fast lookup
+map.gene.names <- function(protein.column, download.chunk.size = 2000, taxonomy.id = 9606) {
+
+  # get a list of all unique UniProt identifiers in the provided protein column
+  unique.proteins <- unique(unlist(strsplit(as.character(protein.column), ";")))
+
+  # strip any ptms off UniProt identifiers if exist
+  UniProt.IDs <- unique(sapply(unique.proteins, function(x) strsplit(x, "_")[[1]][1]))
+
+  # UniProt REST API can arbitrarily truncate large (6000+) queries
+  # Do in smaller chunks to avoid issues
+  chunk_size <- download.chunk.size
+  id_chunks <- split(UniProt.IDs, ceiling(seq_along(UniProt.IDs) / chunk_size))
+
+  # Chunked API call
+  mapping_list <- lapply(id_chunks, function(ids) {
+    AnnotationDbi::select(
+      UniProt.ws(taxId=taxonomy.id),
+      keys = ids,
+      columns = c("UniProtKB", "gene_primary"),
+      keytype = "UniProtKB"
+    )
+  })
+  UniProt.mapping <- do.call(rbind, mapping_list)
+
+  # Throw warning if # UniProt IDs do not match # mapped gene names
+  n_mapped <- nrow(UniProt.mapping)
+  n_total <- length(unique(UniProt.IDs))
+
+  if (n_mapped != n_total) {
+    missing_ids <- setdiff(unique(UniProt.IDs), UniProt.mapping$UniProtKB)
+
+    warning(sprintf(
+      "%d of %d UniProt IDs did not map to gene names (%.1f%%). This should not happen for canonical proteomes.",
+      length(missing_ids), n_total, 100 * length(missing_ids) / n_total
+    ))
+
+    cat(sprintf("Missing IDs (showing up to 10 of %d):\n", length(missing_ids)))
+    print(head(missing_ids, 10))
+
+    if (interactive()) {
+      response <- readline(prompt = "Continue anyway? (y/n): ")
+      if (!tolower(trimws(response)) %in% c("y", "yes")) {
+        stop("Aborted by user due to incomplete UniProt mapping.")
+      }
+    } else {
+      stop(
+        "Incomplete UniProt mapping detected in non-interactive session. ",
+        "Aborting rather than prompting."
+      )
+    }
+  }
+
+  # Lookup table for quick mapping
   gene.name.map <- setNames(UniProt.mapping$Gene.Names..primary., UniProt.mapping$From)
-  
-  # Function to replace UniProt IDs with gene names
-  map_protein <- function(entry) {
+
+  # Row-wise, map all UniProt IDs to to gene names while accounting for PTMs
+  map_protein_group <- function(entry) {
+
     # Split the entry by semicolons
-    
-    phosphosites <- unlist(strsplit(entry, ";"))
-    
+    protein.groups <- unlist(strsplit(entry, ";"))
+
     # Replace UniProt IDs with gene names
-    mapped_sites <- sapply(phosphosites, function(site) {
-      # Split the site by underscore to separate UniProt ID and the rest
-      parts <- unlist(strsplit(site, "_"))
+    protein_mapping <- sapply(protein.groups, function(protein) {
+
+      # Special code to handle PTMs
+      parts <- unlist(strsplit(protein, "_"))
       UniProtID <- parts[1]
-      
+
       # Check if the UniProt ID has a mapped gene name
       gene_name <- gene.name.map[UniProtID]
-      
+
       # If a gene name is found, use it; otherwise, keep the UniProt ID
       if (!is.na(gene_name)) {
         # Recombine the gene name with the remaining part
         paste(c(gene_name, parts[-1]), collapse = "_")
       } else {
         # If no mapping exists, return the original site
-        site
+        protein
       }
     })
-    
+
     # Rejoin the mapped sites with semicolons
-    paste(mapped_sites, collapse = ";")
+    paste(protein_mapping, collapse = ";")
   }
-  
+
   # Apply the mapping function to each row of the protein column
-  mapped_column <- sapply(as.character(protein.column), map_protein)
-  
+  mapped_column <- sapply(as.character(protein.column), map_protein_group)
+
   return(mapped_column)
 }
 
